@@ -1,28 +1,43 @@
 {
   "name": "mf-check",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "dev": "tsx src/index.ts",
-    "build": "tsc"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "version": "0.1.0",
+  "description": "Preflight checks for Salesforce Multi-Framework projects.",
   "type": "module",
-  "devDependencies": {
-    "@types/node": "^26.4.0",
-    "tsx": "^4.23.12",
-    "typescript": "^7.0.2"
+  "engines": {
+    "node": ">=18"
   },
   "bin": {
     "mf-check": "dist/index.js"
   },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\"",
+    "prepublishOnly": "npm run build && npm run test"
+  },
+  "keywords": [
+    "salesforce",
+    "multi-framework",
+    "cli",
+    "preflight",
+    "graphql"
+  ],
+  "license": "MIT",
   "dependencies": {
-    "@graphql-tools/utils": "^12.0.0",
     "fast-xml-parser": "^5.11.1",
     "graphql": "^17.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.0",
+    "prettier": "^3.9.6",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11"
   }
 }

@@ -4,13 +4,7 @@ import { join } from 'node:path';
 export function checkBundles(projectPath: string) {
   let hasError = false;
 
-  const uiBundlesPath = join(
-    projectPath,
-    'force-app',
-    'main',
-    'default',
-    'uiBundles'
-  );
+  const uiBundlesPath = join(projectPath, 'force-app', 'main', 'default', 'uiBundles');
 
   if (!existsSync(uiBundlesPath)) {
     console.error('✗ uiBundles directory not found.');
@@ -40,25 +34,30 @@ export function checkBundles(projectPath: string) {
       continue;
     }
 
-    const configText = readFileSync(configPath, 'utf-8');
-    const config = JSON.parse(configText);
+    let config: { outputDir?: unknown };
 
-    const outputDir = config.outputDir;
+    try {
+      config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    } catch {
+      console.error(`✗ ${bundle}: invalid ui-bundle.json.`);
+      hasError = true;
+      continue;
+    }
 
-    if (!outputDir) {
+    if (typeof config.outputDir !== 'string' || !config.outputDir) {
       console.error(`✗ ${bundle}: outputDir is not defined.`);
       hasError = true;
       continue;
     }
+
+    const outputDir = config.outputDir;
 
     console.log(`✓ ${bundle}: outputDir = ${outputDir}`);
 
     const outputPath = join(bundlePath, outputDir);
 
     if (!existsSync(outputPath)) {
-      console.error(
-        `✗ ${bundle}: output directory does not exist: ${outputDir}`
-      );
+      console.error(`✗ ${bundle}: output directory does not exist: ${outputDir}`);
       hasError = true;
       continue;
     }

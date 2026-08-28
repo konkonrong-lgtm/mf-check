@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+
 import { checkBundles } from './checks/bundle.js';
 import { checkApplications } from './checks/application.js';
 import { checkPermissionSets } from './checks/permissionSet.js';
@@ -9,16 +11,15 @@ const command = args[0];
 const projectPath = args[1];
 
 const targetOrgIndex = args.indexOf('--target-org');
-const targetOrg =
-  targetOrgIndex >= 0
-    ? args[targetOrgIndex + 1]
-    : undefined;
+const hasTargetOrgFlag = targetOrgIndex !== -1;
+const targetOrg = hasTargetOrgFlag ? args[targetOrgIndex + 1] : undefined;
 
 const refresh = args.includes('--refresh');
+const debug = args.includes('--debug');
 
 if (command !== 'check') {
   console.error(
-    'Usage: mf-check check <project-path> [--target-org <alias>] [--refresh]'
+    'Usage: mf-check check <project-path> [--target-org <alias>] [--refresh] [--debug]'
   );
   process.exit(1);
 }
@@ -28,15 +29,20 @@ if (!projectPath) {
   process.exit(1);
 }
 
+if (hasTargetOrgFlag && (!targetOrg || targetOrg.startsWith('--'))) {
+  console.error('--target-org requires an org alias.');
+  process.exit(1);
+}
+
+if (refresh && !targetOrg) {
+  console.error('--refresh requires --target-org.');
+  process.exit(1);
+}
+
 console.log(`Checking project: ${projectPath}`);
 
 const bundleResult = checkBundles(projectPath);
-
-const applicationResult = checkApplications(
-  projectPath,
-  bundleResult.bundles
-);
-
+const applicationResult = checkApplications(projectPath, bundleResult.bundles);
 const permissionSetResult = checkPermissionSets(
   projectPath,
   applicationResult.applicationNames
@@ -45,15 +51,9 @@ const permissionSetResult = checkPermissionSets(
 let schemaResult = { hasError: false };
 
 if (targetOrg) {
-  schemaResult = await checkSchema(
-    projectPath,
-    targetOrg,
-    refresh
-  );
+  schemaResult = await checkSchema(projectPath, targetOrg, refresh, debug);
 } else {
-  console.log(
-    '○ Live GraphQL check skipped: no --target-org provided'
-  );
+  console.log('○ Live GraphQL check skipped: no --target-org provided');
 }
 
 const hasError =

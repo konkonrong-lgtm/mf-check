@@ -2,10 +2,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { XMLParser } from 'fast-xml-parser';
 
-export function checkApplications(
-  projectPath: string,
-  bundles: string[]
-) {
+export function checkApplications(projectPath: string, bundles: string[]) {
   let hasError = false;
 
   const applicationsPath = join(
@@ -24,8 +21,9 @@ export function checkApplications(
     };
   }
 
-  const applicationFiles = readdirSync(applicationsPath)
-    .filter((file) => file.endsWith('.app-meta.xml'));
+  const applicationFiles = readdirSync(applicationsPath).filter((file) =>
+    file.endsWith('.app-meta.xml')
+  );
 
   const parser = new XMLParser();
   const linkedBundles = new Set<string>();
@@ -33,17 +31,24 @@ export function checkApplications(
 
   for (const file of applicationFiles) {
     const filePath = join(applicationsPath, file);
-    const xml = readFileSync(filePath, 'utf-8');
-    const parsed = parser.parse(xml);
-
     const appName = file.replace('.app-meta.xml', '');
+
+    let parsed;
+
+    try {
+      const xml = readFileSync(filePath, 'utf-8');
+      parsed = parser.parse(xml);
+    } catch {
+      console.error(`✗ ${appName}: could not parse application metadata`);
+      hasError = true;
+      continue;
+    }
+
     const uiBundle = parsed.CustomApplication?.uiBundle;
 
     if (!uiBundle) {
       continue;
     }
-
-    applicationNames.push(appName);
 
     const uiType = parsed.CustomApplication?.uiType;
 
@@ -58,25 +63,20 @@ export function checkApplications(
     const bundleName = String(uiBundle).replace(/^c__/, '');
 
     if (!bundles.includes(bundleName)) {
-      console.error(
-        `✗ ${appName}: references missing UI Bundle "${uiBundle}"`
-      );
+      console.error(`✗ ${appName}: references missing UI Bundle "${uiBundle}"`);
       hasError = true;
       continue;
     }
 
+    applicationNames.push(appName);
     linkedBundles.add(bundleName);
 
-    console.log(
-      `✓ ${appName}: Lightning app linked to UI Bundle ${uiBundle}`
-    );
+    console.log(`✓ ${appName}: Lightning app linked to UI Bundle ${uiBundle}`);
   }
 
   for (const bundle of bundles) {
     if (!linkedBundles.has(bundle)) {
-      console.error(
-        `✗ ${bundle}: no CustomApplication references this UI Bundle`
-      );
+      console.error(`✗ ${bundle}: no CustomApplication references this UI Bundle`);
       hasError = true;
     }
   }
