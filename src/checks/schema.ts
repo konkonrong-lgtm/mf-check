@@ -2,21 +2,28 @@ import {
   existsSync,
   readFileSync,
   readdirSync,
+  mkdirSync,
+  writeFileSync,
 } from 'node:fs';
 import { join, relative } from 'node:path';
+import { homedir } from 'node:os';
+import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import {
   buildClientSchema,
   getIntrospectionQuery,
   parse,
-  printSchema,
   validate,
 } from 'graphql';
-import { pruneSchema } from '@graphql-tools/utils';
 
-function normalizeSchema(content: string) {
-  return content.replace(/\r\n/g, '\n').trim();
-}
+const CACHE_TTL_MS = 5 * 60 * 1000;
+
+type CachedSchema = {
+  fetchedAt: number;
+  data: unknown;
+  apiVersion: string;
+  instanceUrl: string;
+};
 
 function runSfJson(args: string[]) {
   const command =
@@ -67,72 +74,90 @@ function findGraphqlFiles(directory: string): string[] {
   return results;
 }
 
+function getCachePath(
+  instanceUrl: string,
+  apiVersion: string
+) {
+  const cacheDirectory = join(
+    homedir(),
+    '.mf-check',
+    'cache'
+  );
+
+  mkdirSync(cacheDirectory, {
+    recursive: true,
+  });
+
+  const cacheKey = createHash('sha256')
+    .update(`${instanceUrl}|${apiVersion}`)
+    .digest('hex');
+
+  return join(
+    cacheDirectory,
+    `${cacheKey}.json`
+  );
+}
+
+function readFreshCache(
+  cachePath: string
+): CachedSchema | null {
+  if (!existsSync(cachePath)) {
+    return null;
+  }
+
+  try {
+    const cached = JSON.parse(
+      readFileSync(cachePath, 'utf-8')
+    ) as CachedSchema;
+
+    if (
+      typeof cached.fetchedAt !== 'number' ||
+      !cached.data
+    ) {
+      return null;
+    }
+
+    const age =
+      Date.now() - cached.fetchedAt;
+
+    if (age >= CACHE_TTL_MS) {
+      return null;
+    }
+
+    return cached;
+  } catch {
+    return null;
+  }
+}
+
+function formatAge(milliseconds: number) {
+  const seconds = Math.floor(
+    milliseconds / 1000
+  );
+
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+
+  return `${Math.floor(seconds / 60)}m`;
+}
+
 export async function checkSchema(
   projectPath: string,
-  targetOrg: string
+  targetOrg: string,
+  refresh = false
 ) {
   try {
-    console.time('org-info');
-
-    // 1. Salesforce org 정보
-    const orgDisplay = runSfJson([
-      'org',
-      'display',
-      '--target-org',
-      targetOrg,
-      '--json',
-    ]);
-
-    const instanceUrl =
-      orgDisplay.result?.instanceUrl;
-
-    if (!instanceUrl) {
-      console.timeEnd('org-info');
-
-      console.error(
-        '✗ Could not determine Salesforce instance URL'
-      );
-
-      return { hasError: true };
-    }
-
-    // 2. Access token
-    const tokenResult = runSfJson([
-      'org',
-      'auth',
-      'show-access-token',
-      '--target-org',
-      targetOrg,
-      '--json',
-    ]);
-
-    const accessToken =
-      tokenResult.result?.accessToken;
-
-    if (!accessToken) {
-      console.timeEnd('org-info');
-
-      console.error(
-        '✗ Could not obtain Salesforce access token'
-      );
-
-      return { hasError: true };
-    }
-
-    // 3. 프로젝트 API version
-    const projectConfigPath = join(
-      projectPath,
-      'sfdx-project.json'
-    );
-
+    // 1. 프로젝트 API version
     const projectConfig = JSON.parse(
-      readFileSync(projectConfigPath, 'utf-8')
+      readFileSync(
+        join(projectPath, 'sfdx-project.json'),
+        'utf-8'
+      )
     );
 
     const apiVersion =
       projectConfig.sourceApiVersion;
-
-    console.timeEnd('org-info');
 
     if (!apiVersion) {
       console.error(
@@ -142,104 +167,175 @@ export async function checkSchema(
       return { hasError: true };
     }
 
+    // 2. Org 식별
+    console.time('org-info');
+
+    const orgDisplay = runSfJson([
+      'org',
+      'display',
+      '--target-org',
+      targetOrg,
+      '--json',
+    ]);
+
+    console.timeEnd('org-info');
+
+    const instanceUrl =
+      orgDisplay.result?.instanceUrl;
+
+    if (!instanceUrl) {
+      console.error(
+        '✗ Could not determine Salesforce instance URL'
+      );
+
+      return { hasError: true };
+    }
+
     console.log(
       `✓ Connected to target org: ${targetOrg} (API v${apiVersion})`
     );
 
-    // 4. Salesforce live GraphQL schema 가져오기
-    console.time('graphql-fetch');
-
-    const response = await fetch(
-      `${instanceUrl}/services/data/v${apiVersion}/graphql`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-          'X-Chatter-Entity-Encoding': 'false',
-        },
-        body: JSON.stringify({
-          query: getIntrospectionQuery(),
-          variables: {},
-          operationName: 'IntrospectionQuery',
-        }),
-      }
+    const cachePath = getCachePath(
+      instanceUrl,
+      apiVersion
     );
 
-    if (!response.ok) {
+    let introspectionData: unknown;
+
+    // 3. 유효한 캐시가 있으면 사용
+    const cached = refresh
+      ? null
+      : readFreshCache(cachePath);
+
+    if (cached) {
+      const age =
+        Date.now() - cached.fetchedAt;
+
+      console.log(
+        `✓ Using cached Salesforce schema (${formatAge(age)} old)`
+      );
+
+      introspectionData = cached.data;
+    } else {
+      if (refresh) {
+        console.log(
+          '○ Cache bypassed by --refresh'
+        );
+      } else if (existsSync(cachePath)) {
+        console.log(
+          '○ Cached schema expired; fetching latest schema'
+        );
+      } else {
+        console.log(
+          '○ No cached schema; fetching latest schema'
+        );
+      }
+
+      // 4. 실제 access token은 live fetch할 때만 가져옴
+      console.time('auth-token');
+
+      const tokenResult = runSfJson([
+        'org',
+        'auth',
+        'show-access-token',
+        '--target-org',
+        targetOrg,
+        '--json',
+      ]);
+
+      console.timeEnd('auth-token');
+
+      const accessToken =
+        tokenResult.result?.accessToken;
+
+      if (!accessToken) {
+        console.error(
+          '✗ Could not obtain Salesforce access token'
+        );
+
+        return { hasError: true };
+      }
+
+      // 5. Live Salesforce schema fetch
+      console.time('graphql-fetch');
+
+      const response = await fetch(
+        `${instanceUrl}/services/data/v${apiVersion}/graphql`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+            'X-Chatter-Entity-Encoding': 'false',
+          },
+          body: JSON.stringify({
+            query: getIntrospectionQuery(),
+            variables: {},
+            operationName:
+              'IntrospectionQuery',
+          }),
+        }
+      );
+
+      if (!response.ok) {
+        console.timeEnd('graphql-fetch');
+
+        console.error(
+          `✗ GraphQL schema request failed: HTTP ${response.status}`
+        );
+
+        return { hasError: true };
+      }
+
+      const body = (await response.json()) as {
+        data?: unknown;
+        errors?: unknown;
+      };
+
       console.timeEnd('graphql-fetch');
 
-      console.error(
-        `✗ GraphQL schema request failed: HTTP ${response.status}`
-      );
+      if (!body.data) {
+        console.error(
+          '✗ Salesforce returned no GraphQL schema'
+        );
 
-      return { hasError: true };
-    }
+        return { hasError: true };
+      }
 
-    const body = (await response.json()) as {
-      data?: unknown;
-      errors?: unknown;
-    };
+      introspectionData = body.data;
 
-    console.timeEnd('graphql-fetch');
+      const cache: CachedSchema = {
+        fetchedAt: Date.now(),
+        data: body.data,
+        apiVersion,
+        instanceUrl,
+      };
 
-    if (!body.data) {
-      console.error(
-        '✗ Salesforce returned no GraphQL schema'
-      );
-
-      return { hasError: true };
-    }
-
-    // 5. Introspection → GraphQLSchema
-    console.time('schema-processing');
-
-    const liveGraphqlSchema = buildClientSchema(
-        body.data as any,
-        {
-            assumeValid: true,
-        }
-    );
-
-    const prunedSchema =
-      pruneSchema(liveGraphqlSchema);
-
-    const liveSchemaText =
-      printSchema(prunedSchema);
-
-    console.timeEnd('schema-processing');
-
-    // 6. local schema와 비교
-    const localSchemaPath = join(
-      projectPath,
-      'schema.graphql'
-    );
-
-    if (existsSync(localSchemaPath)) {
-      const localSchema = readFileSync(
-        localSchemaPath,
+      writeFileSync(
+        cachePath,
+        JSON.stringify(cache),
         'utf-8'
       );
 
-      if (
-        normalizeSchema(localSchema) ===
-        normalizeSchema(liveSchemaText)
-      ) {
-        console.log(
-          '✓ GraphQL schema is fresh'
-        );
-      } else {
-        console.warn(
-          '⚠ Local GraphQL schema differs from target org'
-        );
-      }
-    } else {
-      console.warn(
-        '⚠ Local schema.graphql not found'
+      console.log(
+        '✓ Salesforce schema cached for 5 minutes'
       );
     }
 
-    // 7. 프로젝트가 실제 사용하는 GraphQL operation 검사
+    // 6. Introspection → GraphQLSchema
+    console.time('schema-processing');
+
+    const liveGraphqlSchema =
+      buildClientSchema(
+        introspectionData as any,
+        {
+          assumeValid: true,
+        }
+      );
+
+    console.timeEnd('schema-processing');
+
+    // 7. 프로젝트 GraphQL 파일 탐색
     const uiBundlesPath = join(
       projectPath,
       'force-app',
@@ -265,6 +361,7 @@ export async function checkSchema(
 
     let hasOperationError = false;
 
+    // 8. Live org schema 기준 검증
     for (const filePath of graphqlFiles) {
       const displayPath = relative(
         projectPath,

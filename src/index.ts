@@ -14,9 +14,12 @@ const targetOrg =
     ? args[targetOrgIndex + 1]
     : undefined;
 
+const refresh = args.includes('--refresh');
+
 if (command !== 'check') {
   console.error(
-    'Usage: mf-check check <project-path> [--target-org <alias>]');
+    'Usage: mf-check check <project-path> [--target-org <alias>] [--refresh]'
+  );
   process.exit(1);
 }
 
@@ -44,12 +47,14 @@ let schemaResult = { hasError: false };
 if (targetOrg) {
   schemaResult = await checkSchema(
     projectPath,
-    targetOrg
+    targetOrg,
+    refresh
   );
 } else {
-  console.log('○ Schema check skipped: no --target-org provided');
+  console.log(
+    '○ Live GraphQL check skipped: no --target-org provided'
+  );
 }
-
 
 const hasError =
   bundleResult.hasError ||
