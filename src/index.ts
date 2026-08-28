@@ -1,11 +1,22 @@
 import { checkBundles } from './checks/bundle.js';
 import { checkApplications } from './checks/application.js';
 import { checkPermissionSets } from './checks/permissionSet.js';
+import { checkSchema } from './checks/schema.js';
 
-const [, , command, projectPath] = process.argv;
+const args = process.argv.slice(2);
+
+const command = args[0];
+const projectPath = args[1];
+
+const targetOrgIndex = args.indexOf('--target-org');
+const targetOrg =
+  targetOrgIndex >= 0
+    ? args[targetOrgIndex + 1]
+    : undefined;
 
 if (command !== 'check') {
-  console.error('Usage: mf-check check <project-path>');
+  console.error(
+    'Usage: mf-check check <project-path> [--target-org <alias>]');
   process.exit(1);
 }
 
@@ -28,10 +39,23 @@ const permissionSetResult = checkPermissionSets(
   applicationResult.applicationNames
 );
 
+let schemaResult = { hasError: false };
+
+if (targetOrg) {
+  schemaResult = await checkSchema(
+    projectPath,
+    targetOrg
+  );
+} else {
+  console.log('○ Schema check skipped: no --target-org provided');
+}
+
+
 const hasError =
   bundleResult.hasError ||
   applicationResult.hasError ||
-  permissionSetResult.hasError;
+  permissionSetResult.hasError ||
+  schemaResult.hasError;
 
 if (hasError) {
   console.log('\nNOT READY');
