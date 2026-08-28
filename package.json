@@ -4,7 +4,7 @@
   "description": "Preflight checks for Salesforce Multi-Framework projects.",
   "type": "module",
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "bin": {
     "mf-check": "dist/index.js"

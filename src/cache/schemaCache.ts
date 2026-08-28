@@ -9,9 +9,6 @@ export const CACHE_TTL_MINUTES = CACHE_TTL_MS / 60_000;
 export type CachedSchema = {
   fetchedAt: number;
   data: unknown;
-  apiVersion: string;
-  instanceUrl: string;
-  username: string;
 };
 
 export function getSchemaCachePath(

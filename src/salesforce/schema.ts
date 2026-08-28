@@ -22,14 +22,9 @@ async function fetchSalesforceSchema(
     console.time('auth-token');
   }
 
-  const tokenResult = runSfJson([
-    'org',
-    'auth',
-    'show-access-token',
-    '--target-org',
-    targetOrg,
-    '--json',
-  ]);
+  const tokenResult = runSfJson(['org', 'auth', 'show-access-token', '--json'], {
+    SF_TARGET_ORG: targetOrg,
+  });
 
   if (debug) {
     console.timeEnd('auth-token');
@@ -88,7 +83,9 @@ export async function getSalesforceSchema(
     console.time('org-info');
   }
 
-  const orgDisplay = runSfJson(['org', 'display', '--target-org', targetOrg, '--json']);
+  const orgDisplay = runSfJson(['org', 'display', '--json'], {
+    SF_TARGET_ORG: targetOrg,
+  });
 
   if (debug) {
     console.timeEnd('org-info');
@@ -133,9 +130,6 @@ export async function getSalesforceSchema(
   const cache: CachedSchema = {
     fetchedAt: Date.now(),
     data: introspectionData,
-    apiVersion,
-    instanceUrl,
-    username,
   };
 
   writeSchemaCache(cachePath, cache);

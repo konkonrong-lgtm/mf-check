@@ -37,9 +37,6 @@ describe('schema cache', () => {
     const cache: CachedSchema = {
       fetchedAt: Date.now(),
       data: { __schema: {} },
-      apiVersion: '67.0',
-      instanceUrl: 'https://example.my.salesforce.com',
-      username: 'user@example.com',
     };
 
     writeSchemaCache(cachePath, cache);
@@ -53,9 +50,6 @@ describe('schema cache', () => {
     const cache: CachedSchema = {
       fetchedAt: Date.now(),
       data: { __schema: {} },
-      apiVersion: '67.0',
-      instanceUrl: 'https://example.my.salesforce.com',
-      username: 'user@example.com',
     };
 
     writeSchemaCache(cachePath, cache);

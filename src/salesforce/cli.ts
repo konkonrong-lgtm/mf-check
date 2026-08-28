@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 
-export function runSfJson(args: string[]) {
+export function runSfJson(args: string[], env: NodeJS.ProcessEnv = {}) {
   const command =
     process.platform === 'win32' ? (process.env.ComSpec ?? 'cmd.exe') : 'sf';
 
@@ -10,6 +10,10 @@ export function runSfJson(args: string[]) {
   const output = execFileSync(command, commandArgs, {
     encoding: 'utf-8',
     stdio: ['ignore', 'pipe', 'pipe'],
+    env: {
+      ...process.env,
+      ...env,
+    },
   });
 
   return JSON.parse(output);
