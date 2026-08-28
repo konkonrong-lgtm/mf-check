@@ -24,6 +24,14 @@ Currently:
 Live schema results are cached for 5 minutes because Salesforce introspection
 can be slow. Use `--refresh` together with `--target-org` to bypass the cache.
 
+## Installation
+
+Requires Node.js 22 or later.
+
+```bash
+npm install -g @konkonrong/mf-check
+```
+
 ## Usage
 
 For local metadata checks:
