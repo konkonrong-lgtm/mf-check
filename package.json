@@ -1,5 +1,5 @@
 {
-  "name": "mf-check",
+  "name": "@konkonrong/mf-check",
   "version": "0.1.0",
   "description": "Preflight checks for Salesforce Multi-Framework projects.",
   "type": "module",
