@@ -39,5 +39,13 @@
     "tsx": "^4.23.12",
     "typescript": "^7.0.2",
     "vitest": "^4.1.11"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/konkonrong-lgtm/mf-check.git"
+  },
+  "bugs": {
+    "url": "https://github.com/konkonrong-lgtm/mf-check/issues"
+  },
+  "homepage": "https://github.com/konkonrong-lgtm/mf-check#readme"
 }
