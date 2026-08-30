@@ -19,6 +19,7 @@ const mockedGetSalesforceSchema = vi.mocked(getSalesforceSchema);
 describe('checkSchema', () => {
   let projectPath: string;
   let metadataRoot: string;
+  let bundlePath: string;
   let graphqlPath: string;
 
   beforeEach(() => {
@@ -26,7 +27,9 @@ describe('checkSchema', () => {
 
     metadataRoot = join(projectPath, 'src', 'main', 'default');
 
-    graphqlPath = join(metadataRoot, 'uiBundles', 'MfLab', 'src', 'api');
+    bundlePath = join(metadataRoot, 'uiBundles', 'MfLab');
+
+    graphqlPath = join(bundlePath, 'src', 'api');
 
     mkdirSync(graphqlPath, {
       recursive: true,
@@ -89,7 +92,12 @@ describe('checkSchema', () => {
       `
     );
 
-    const result = await checkSchema(projectPath, [metadataRoot], '67.0', 'vscodeOrg');
+    const result = await checkSchema(
+      projectPath,
+      [join(metadataRoot, 'uiBundles')],
+      '67.0',
+      'vscodeOrg'
+    );
 
     expect(result.diagnostics).toEqual(
       expect.arrayContaining([
@@ -108,9 +116,67 @@ describe('checkSchema', () => {
     );
   });
 
-  it('fails when GraphQL operation contains an unknown field', async () => {
+  it('validates an operation and fragment from separate files together', async () => {
+    const fragmentPath = join(graphqlPath, 'accountFields.graphql');
+    const operationPath = join(graphqlPath, 'getAccounts.graphql');
+
     writeFileSync(
-      join(graphqlPath, 'getAccounts.graphql'),
+      fragmentPath,
+      `
+        fragment AccountFields on Account {
+          Id
+          Name
+        }
+      `
+    );
+
+    writeFileSync(
+      operationPath,
+      `
+        query GetAccounts {
+          Account {
+            edges {
+              node {
+                ...AccountFields
+              }
+            }
+          }
+        }
+      `
+    );
+
+    const result = await checkSchema(
+      projectPath,
+      [join(metadataRoot, 'uiBundles')],
+      '67.0',
+      'vscodeOrg'
+    );
+
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'MF-GRAPHQL-003',
+          status: 'PASS',
+          file: fragmentPath,
+        }),
+        expect.objectContaining({
+          id: 'MF-GRAPHQL-003',
+          status: 'PASS',
+          file: operationPath,
+        }),
+      ])
+    );
+
+    expect(result.diagnostics.some((diagnostic) => diagnostic.status === 'FAIL')).toBe(
+      false
+    );
+  });
+
+  it('fails when GraphQL operation contains an unknown field', async () => {
+    const operationPath = join(graphqlPath, 'getAccounts.graphql');
+
+    writeFileSync(
+      operationPath,
       `
         query GetAccounts {
           Accounnt {
@@ -124,15 +190,303 @@ describe('checkSchema', () => {
       `
     );
 
-    const result = await checkSchema(projectPath, [metadataRoot], '67.0', 'vscodeOrg');
+    const result = await checkSchema(
+      projectPath,
+      [join(metadataRoot, 'uiBundles')],
+      '67.0',
+      'vscodeOrg'
+    );
 
     expect(result.diagnostics).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           id: 'MF-GRAPHQL-004',
           status: 'FAIL',
+          file: operationPath,
+          line: 3,
         }),
       ])
+    );
+  });
+
+  it('excludes SDL-only files from live operation validation', async () => {
+    writeFileSync(
+      join(graphqlPath, 'local-schema.graphql'),
+      `
+        type LocalOnly {
+          id: ID!
+        }
+      `
+    );
+
+    const result = await checkSchema(
+      projectPath,
+      [join(metadataRoot, 'uiBundles')],
+      '67.0',
+      'vscodeOrg'
+    );
+
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'MF-GRAPHQL-002',
+          status: 'PASS',
+        }),
+      ])
+    );
+    expect(
+      result.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.id === 'MF-GRAPHQL-004' || diagnostic.id === 'MF-GRAPHQL-005'
+      )
+    ).toBe(false);
+  });
+
+  it('excludes generated, dependency, build, coverage, and fixture directories', async () => {
+    const ignoredDirectories = [
+      'node_modules',
+      'dist',
+      'build',
+      'coverage',
+      'fixtures',
+      '__fixtures__',
+      'test-fixtures',
+      'generated',
+      '__generated__',
+    ];
+
+    for (const directory of ignoredDirectories) {
+      const ignoredPath = join(bundlePath, directory);
+      mkdirSync(ignoredPath, { recursive: true });
+      writeFileSync(
+        join(ignoredPath, 'ignored.graphql'),
+        'query Ignored { MissingField }'
+      );
+    }
+
+    const result = await checkSchema(
+      projectPath,
+      [join(metadataRoot, 'uiBundles')],
+      '67.0',
+      'vscodeOrg'
+    );
+
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'MF-GRAPHQL-002',
+          status: 'PASS',
+        }),
+      ])
+    );
+    expect(result.diagnostics.some((diagnostic) => diagnostic.status === 'FAIL')).toBe(
+      false
+    );
+  });
+
+  it('validates only the source copy when a custom outputDir contains the same operation', async () => {
+    const sourcePath = join(graphqlPath, 'getAccounts.graphql');
+    const outputPath = join(bundlePath, 'release-output');
+    const outputGraphqlPath = join(outputPath, 'getAccounts.graphql');
+    const query = `query GetAccounts {
+      Account { edges { node { Id } } }
+    }`;
+
+    mkdirSync(outputPath, { recursive: true });
+    writeFileSync(
+      join(bundlePath, 'ui-bundle.json'),
+      JSON.stringify({ outputDir: 'release-output' })
+    );
+    writeFileSync(sourcePath, query);
+    writeFileSync(outputGraphqlPath, query);
+
+    const result = await checkSchema(
+      projectPath,
+      [join(metadataRoot, 'uiBundles')],
+      '67.0',
+      'vscodeOrg'
+    );
+
+    expect(result.diagnostics).toEqual([
+      expect.objectContaining({
+        id: 'MF-GRAPHQL-003',
+        status: 'PASS',
+        file: sourcePath,
+      }),
+    ]);
+  });
+
+  it('does not collect GraphQL files from a configured custom outputDir', async () => {
+    const outputPath = join(bundlePath, 'release-output');
+
+    mkdirSync(outputPath, { recursive: true });
+    writeFileSync(
+      join(bundlePath, 'ui-bundle.json'),
+      JSON.stringify({ outputDir: 'release-output' })
+    );
+    writeFileSync(
+      join(outputPath, 'generated.graphql'),
+      'query Generated { MissingField }'
+    );
+
+    const result = await checkSchema(
+      projectPath,
+      [join(metadataRoot, 'uiBundles')],
+      '67.0',
+      'vscodeOrg'
+    );
+
+    expect(result.diagnostics).toEqual([
+      expect.objectContaining({
+        id: 'MF-GRAPHQL-002',
+        status: 'PASS',
+      }),
+    ]);
+  });
+
+  it('still fails for invalid source GraphQL when a custom outputDir is configured', async () => {
+    const operationPath = join(graphqlPath, 'getAccounts.graphql');
+    const outputPath = join(bundlePath, 'release-output');
+
+    mkdirSync(outputPath, { recursive: true });
+    writeFileSync(
+      join(bundlePath, 'ui-bundle.json'),
+      JSON.stringify({ outputDir: 'release-output' })
+    );
+    writeFileSync(operationPath, 'query InvalidSource { MissingField }');
+    writeFileSync(
+      join(outputPath, 'generated.graphql'),
+      'query Generated { MissingField }'
+    );
+
+    const result = await checkSchema(
+      projectPath,
+      [join(metadataRoot, 'uiBundles')],
+      '67.0',
+      'vscodeOrg'
+    );
+
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'MF-GRAPHQL-004',
+          status: 'FAIL',
+          file: operationPath,
+        }),
+      ])
+    );
+    expect(
+      result.diagnostics.some(
+        (diagnostic) => diagnostic.file === join(outputPath, 'generated.graphql')
+      )
+    ).toBe(false);
+  });
+
+  it('applies each bundle custom outputDir only to that bundle', async () => {
+    const firstSourcePath = join(graphqlPath, 'first.graphql');
+    const firstOutputPath = join(bundlePath, 'shared-output');
+    const secondBundlePath = join(metadataRoot, 'uiBundles', 'SecondBundle');
+    const secondSourcePath = join(secondBundlePath, 'shared-output', 'second.graphql');
+    const secondOutputPath = join(secondBundlePath, 'second-output');
+
+    mkdirSync(firstOutputPath, { recursive: true });
+    mkdirSync(join(secondBundlePath, 'shared-output'), { recursive: true });
+    mkdirSync(secondOutputPath, { recursive: true });
+
+    writeFileSync(
+      join(bundlePath, 'ui-bundle.json'),
+      JSON.stringify({ outputDir: 'shared-output' })
+    );
+    writeFileSync(
+      join(secondBundlePath, 'ui-bundle.json'),
+      JSON.stringify({ outputDir: 'second-output' })
+    );
+    writeFileSync(
+      firstSourcePath,
+      'query FirstAccounts { Account { edges { node { Id } } } }'
+    );
+    writeFileSync(
+      join(firstOutputPath, 'generated.graphql'),
+      'query GeneratedFirst { MissingField }'
+    );
+    writeFileSync(
+      secondSourcePath,
+      'query SecondAccounts { Account { edges { node { Name } } } }'
+    );
+    writeFileSync(
+      join(secondOutputPath, 'generated.graphql'),
+      'query GeneratedSecond { MissingField }'
+    );
+
+    const result = await checkSchema(
+      projectPath,
+      [join(metadataRoot, 'uiBundles')],
+      '67.0',
+      'vscodeOrg'
+    );
+
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'MF-GRAPHQL-003',
+          status: 'PASS',
+          file: firstSourcePath,
+        }),
+        expect.objectContaining({
+          id: 'MF-GRAPHQL-003',
+          status: 'PASS',
+          file: secondSourcePath,
+        }),
+      ])
+    );
+    expect(result.diagnostics.some((diagnostic) => diagnostic.status === 'FAIL')).toBe(
+      false
+    );
+  });
+
+  it('validates bundles independently when they use the same fragment name', async () => {
+    const secondGraphqlPath = join(
+      metadataRoot,
+      'uiBundles',
+      'SecondBundle',
+      'src',
+      'api'
+    );
+    mkdirSync(secondGraphqlPath, { recursive: true });
+
+    writeFileSync(
+      join(graphqlPath, 'accountFields.graphql'),
+      'fragment SharedAccountFields on Account { Id }'
+    );
+    writeFileSync(
+      join(graphqlPath, 'getAccounts.graphql'),
+      `query FirstAccounts {
+        Account { edges { node { ...SharedAccountFields } } }
+      }`
+    );
+    writeFileSync(
+      join(secondGraphqlPath, 'accountFields.graphql'),
+      'fragment SharedAccountFields on Account { Name }'
+    );
+    writeFileSync(
+      join(secondGraphqlPath, 'getAccounts.graphql'),
+      `query SecondAccounts {
+        Account { edges { node { ...SharedAccountFields } } }
+      }`
+    );
+
+    const result = await checkSchema(
+      projectPath,
+      [join(metadataRoot, 'uiBundles')],
+      '67.0',
+      'vscodeOrg'
+    );
+
+    expect(
+      result.diagnostics.filter((diagnostic) => diagnostic.status === 'PASS')
+    ).toHaveLength(4);
+    expect(result.diagnostics.some((diagnostic) => diagnostic.status === 'FAIL')).toBe(
+      false
     );
   });
 
@@ -152,7 +506,13 @@ describe('checkSchema', () => {
       `
     );
 
-    await checkSchema(projectPath, [metadataRoot], '67.0', 'vscodeOrg', true);
+    await checkSchema(
+      projectPath,
+      [join(metadataRoot, 'uiBundles')],
+      '67.0',
+      'vscodeOrg',
+      true
+    );
 
     expect(mockedGetSalesforceSchema).toHaveBeenCalledWith(
       'vscodeOrg',
@@ -163,7 +523,14 @@ describe('checkSchema', () => {
   });
 
   it('forwards debug option to Salesforce schema loader', async () => {
-    await checkSchema(projectPath, [metadataRoot], '67.0', 'vscodeOrg', false, true);
+    await checkSchema(
+      projectPath,
+      [join(metadataRoot, 'uiBundles')],
+      '67.0',
+      'vscodeOrg',
+      false,
+      true
+    );
 
     expect(mockedGetSalesforceSchema).toHaveBeenCalledWith(
       'vscodeOrg',
@@ -205,7 +572,7 @@ describe('checkSchema', () => {
 
     const result = await checkSchema(
       projectPath,
-      [metadataRoot, secondMetadataRoot],
+      [join(metadataRoot, 'uiBundles'), join(secondMetadataRoot, 'uiBundles')],
       '67.0',
       'vscodeOrg'
     );
@@ -229,7 +596,7 @@ describe('checkSchema', () => {
 
     const result = await checkSchema(
       projectPath,
-      [metadataRoot, secondMetadataRoot],
+      [join(metadataRoot, 'uiBundles'), join(secondMetadataRoot, 'uiBundles')],
       '67.0',
       'vscodeOrg'
     );

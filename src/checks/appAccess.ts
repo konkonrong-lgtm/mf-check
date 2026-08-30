@@ -25,6 +25,7 @@ export function checkAppAccess(
         id: 'MF-ACCESS-003',
         category: 'access',
         status: 'UNKNOWN',
+        blocksReadiness: true,
         summary: `${appName}: application access not confirmed`,
         problem: `No PermissionSet or Profile in the project grants application visibility for "${appName}".`,
         possibleCauses: [

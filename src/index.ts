@@ -8,8 +8,9 @@ import { checkAppAccess } from './checks/appAccess.js';
 import { discoverProject } from './project/discovery.js';
 import { checkSchema, type SchemaCheckRuntimeInfo } from './checks/schema.js';
 import type { DiagnosticResult } from './diagnostics/types.js';
-import { hasFailures } from './diagnostics/result.js';
+import { hasFailures, hasReadinessBlockers } from './diagnostics/result.js';
 import { renderCheckResults } from './renderers/checkRenderer.js';
+import { renderDoctorResults } from './renderers/doctorRenderer.js';
 
 const args = process.argv.slice(2);
 
@@ -23,9 +24,9 @@ const targetOrg = hasTargetOrgFlag ? args[targetOrgIndex + 1] : undefined;
 const refresh = args.includes('--refresh');
 const debug = args.includes('--debug');
 
-if (command !== 'check') {
+if (command !== 'check' && command !== 'doctor') {
   console.error(
-    'Usage: mf-check check <project-path> [--target-org <alias>] [--refresh] [--debug]'
+    'Usage: mf-check <check|doctor> <project-path> [--target-org <alias>] [--refresh] [--debug]'
   );
   process.exit(1);
 }
@@ -46,9 +47,11 @@ if (refresh && !targetOrg) {
 }
 
 const discoveryResult = discoverProject(projectPath);
+const projectDiscoveryFailed = hasFailures(discoveryResult.diagnostics);
 const metadataRoots = discoveryResult.metadataRoots;
+const uiBundlesPaths = discoveryResult.uiBundlesPaths;
 
-const bundleResult = checkBundles(metadataRoots);
+const bundleResult = checkBundles(uiBundlesPaths);
 
 const applicationResult = checkApplications(metadataRoots, bundleResult.bundles);
 
@@ -65,27 +68,29 @@ const appAccessResult = checkAppAccess(
 let schemaDiagnostics: DiagnosticResult[] = [];
 let schemaRuntime: SchemaCheckRuntimeInfo | undefined;
 
-if (targetOrg) {
-  const schemaResult = await checkSchema(
-    projectPath,
-    metadataRoots,
-    discoveryResult.sourceApiVersion,
-    targetOrg,
-    refresh,
-    debug
-  );
+if (!projectDiscoveryFailed) {
+  if (targetOrg) {
+    const schemaResult = await checkSchema(
+      projectPath,
+      uiBundlesPaths,
+      discoveryResult.sourceApiVersion,
+      targetOrg,
+      refresh,
+      debug
+    );
 
-  schemaDiagnostics = schemaResult.diagnostics;
-  schemaRuntime = schemaResult.runtime;
-} else {
-  schemaDiagnostics.push({
-    id: 'MF-GRAPHQL-007',
-    category: 'data',
-    status: 'UNKNOWN',
-    summary: 'Live GraphQL check skipped: no target org provided',
-    problem:
-      'The target org was not provided, so live GraphQL validation was not performed.',
-  });
+    schemaDiagnostics = schemaResult.diagnostics;
+    schemaRuntime = schemaResult.runtime;
+  } else {
+    schemaDiagnostics.push({
+      id: 'MF-GRAPHQL-007',
+      category: 'data',
+      status: 'UNKNOWN',
+      summary: 'Live GraphQL check skipped: no target org provided',
+      problem:
+        'The target org was not provided, so live GraphQL validation was not performed.',
+    });
+  }
 }
 const diagnostics = [
   ...discoveryResult.diagnostics,
@@ -97,14 +102,22 @@ const diagnostics = [
   ...schemaDiagnostics,
 ];
 
-const hasError = hasFailures(diagnostics);
+const readinessBlocked = hasReadinessBlockers(diagnostics);
 
-renderCheckResults(diagnostics, {
-  projectPath,
-  hasError,
-  ...(schemaRuntime ? { schemaRuntime } : {}),
-});
+if (command === 'doctor') {
+  renderDoctorResults(diagnostics, {
+    projectPath,
+    hasError: readinessBlocked,
+    ...(schemaRuntime ? { schemaRuntime } : {}),
+  });
+} else {
+  renderCheckResults(diagnostics, {
+    projectPath,
+    hasError: readinessBlocked,
+    ...(schemaRuntime ? { schemaRuntime } : {}),
+  });
+}
 
-if (hasError) {
+if (readinessBlocked) {
   process.exitCode = 1;
 }

@@ -1,21 +1,39 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 import type { DiagnosticResult } from '../diagnostics/types.js';
 
 export type ProjectDiscoveryResult = {
   metadataRoots: string[];
+  uiBundlesPaths: string[];
   sourceApiVersion?: string;
   diagnostics: DiagnosticResult[];
 };
+
+const ignoredMainDirectories = new Set([
+  'node_modules',
+  'dist',
+  'build',
+  'cache',
+  '.cache',
+]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
+function isDirectory(path: string): boolean {
+  try {
+    return lstatSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 export function discoverProject(projectPath: string): ProjectDiscoveryResult {
   const diagnostics: DiagnosticResult[] = [];
   const metadataRoots = new Set<string>();
+  const uiBundlesPaths = new Set<string>();
 
   const configPath = join(projectPath, 'sfdx-project.json');
 
@@ -31,6 +49,7 @@ export function discoverProject(projectPath: string): ProjectDiscoveryResult {
 
     return {
       metadataRoots: [],
+      uiBundlesPaths: [],
       diagnostics,
     };
   }
@@ -54,6 +73,7 @@ export function discoverProject(projectPath: string): ProjectDiscoveryResult {
 
     return {
       metadataRoots: [],
+      uiBundlesPaths: [],
       diagnostics,
     };
   }
@@ -74,6 +94,7 @@ export function discoverProject(projectPath: string): ProjectDiscoveryResult {
 
     return {
       metadataRoots: [],
+      uiBundlesPaths: [],
       diagnostics,
     };
   }
@@ -100,12 +121,37 @@ export function discoverProject(projectPath: string): ProjectDiscoveryResult {
     }
 
     const packagePath = resolve(projectPath, packageDirectory.path);
+    const mainPath = join(packagePath, 'main');
+    const defaultMetadataRoot = join(mainPath, 'default');
 
-    metadataRoots.add(join(packagePath, 'main', 'default'));
+    metadataRoots.add(defaultMetadataRoot);
+    uiBundlesPaths.add(join(defaultMetadataRoot, 'uiBundles'));
+
+    if (!isDirectory(mainPath)) {
+      continue;
+    }
+
+    const sourceDirectories = readdirSync(mainPath, {
+      withFileTypes: true,
+    })
+      .filter(
+        (entry) =>
+          entry.isDirectory() && !ignoredMainDirectories.has(entry.name.toLowerCase())
+      )
+      .sort((left, right) => left.name.localeCompare(right.name));
+
+    for (const sourceDirectory of sourceDirectories) {
+      const uiBundlesPath = join(mainPath, sourceDirectory.name, 'uiBundles');
+
+      if (isDirectory(uiBundlesPath)) {
+        uiBundlesPaths.add(uiBundlesPath);
+      }
+    }
   }
 
   return {
     metadataRoots: [...metadataRoots],
+    uiBundlesPaths: [...uiBundlesPaths],
     diagnostics,
     ...(sourceApiVersion ? { sourceApiVersion } : {}),
   };

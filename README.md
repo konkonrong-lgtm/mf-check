@@ -33,6 +33,8 @@ Requires Node.js 22 or later.
 npm install -g @konkonrong/mf-check
 ```
 
+Live target-org validation also requires the Salesforce CLI (`sf`) and an authenticated Salesforce org.
+
 ## Usage
 
 For local metadata checks:
@@ -41,10 +43,26 @@ For local metadata checks:
 mf-check check <project-path>
 ```
 
+For a detailed diagnostic report:
+
+```bash
+mf-check doctor <project-path>
+```
+
+`doctor` shows all check results and provides additional details for warnings,
+failures, and checks that could not be confirmed, including possible causes
+and remediation when available.
+
 To also validate GraphQL operations against an org:
 
 ```bash
 mf-check check <project-path> --target-org <org-alias>
+```
+
+Detailed diagnostics can also use a target org:
+
+```bash
+mf-check doctor <project-path> --target-org <org-alias>
 ```
 
 To ignore the cached schema:

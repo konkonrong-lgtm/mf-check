@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { hasReadinessBlockers } from '../diagnostics/result.js';
 import { checkAppAccess } from './appAccess.js';
 
 describe('checkAppAccess', () => {
@@ -54,8 +55,11 @@ describe('checkAppAccess', () => {
         expect.objectContaining({
           id: 'MF-ACCESS-003',
           status: 'UNKNOWN',
+          blocksReadiness: true,
         }),
       ])
     );
+
+    expect(hasReadinessBlockers(result.diagnostics)).toBe(true);
   });
 });

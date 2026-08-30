@@ -1,10 +1,45 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { checkBundles } from './bundle.js';
+
+function createValidBundle(bundlePath: string, bundleName = 'MfLab'): void {
+  mkdirSync(join(bundlePath, 'dist'), {
+    recursive: true,
+  });
+
+  writeFileSync(
+    join(bundlePath, `${bundleName}.uibundle-meta.xml`),
+    `<?xml version="1.0" encoding="UTF-8"?>
+    <UIBundle xmlns="http://soap.sforce.com/2006/04/metadata">
+      <masterLabel>${bundleName}</masterLabel>
+      <target>CustomApplication</target>
+    </UIBundle>`
+  );
+
+  writeFileSync(
+    join(bundlePath, 'ui-bundle.json'),
+    JSON.stringify({
+      outputDir: 'dist',
+    })
+  );
+
+  writeFileSync(join(bundlePath, 'dist', 'index.html'), '<div id="root"></div>');
+}
+
+function createNestedContent(outputPath: string, directoryDepth: number): void {
+  let contentPath = outputPath;
+
+  for (let depth = 0; depth < directoryDepth; depth += 1) {
+    contentPath = join(contentPath, `level-${depth + 1}`);
+    mkdirSync(contentPath);
+  }
+
+  writeFileSync(join(contentPath, 'index.html'), '<div id="root"></div>');
+}
 
 describe('checkBundles', () => {
   let projectPath: string;
@@ -27,21 +62,12 @@ describe('checkBundles', () => {
     });
   });
 
-  it('passes when a UI Bundle has a valid output directory', () => {
+  it('passes when a UI Bundle has valid metadata and deployable output', () => {
     const bundlePath = join(metadataRoot, 'uiBundles', 'MfLab');
 
-    mkdirSync(join(bundlePath, 'dist'), {
-      recursive: true,
-    });
+    createValidBundle(bundlePath);
 
-    writeFileSync(
-      join(bundlePath, 'ui-bundle.json'),
-      JSON.stringify({
-        outputDir: 'dist',
-      })
-    );
-
-    const result = checkBundles([metadataRoot]);
+    const result = checkBundles([join(metadataRoot, 'uiBundles')]);
 
     expect(result.bundles).toEqual(['MfLab']);
 
@@ -51,6 +77,161 @@ describe('checkBundles', () => {
           id: 'MF-META-006',
           status: 'PASS',
         }),
+        expect.objectContaining({
+          id: 'MF-META-015',
+          status: 'PASS',
+        }),
+      ])
+    );
+
+    expect(result.diagnostics.some((diagnostic) => diagnostic.status === 'FAIL')).toBe(
+      false
+    );
+  });
+
+  it.each(['.', '..', '../../shared', String.raw`build\client`])(
+    'fails when outputDir uses an SDR-invalid path: %s',
+    (outputDir) => {
+      const bundlePath = join(metadataRoot, 'uiBundles', 'MfLab');
+      const sharedPath = join(metadataRoot, 'shared');
+
+      createValidBundle(bundlePath);
+      mkdirSync(sharedPath, { recursive: true });
+      writeFileSync(join(sharedPath, 'index.html'), '<div id="root"></div>');
+      writeFileSync(join(bundlePath, 'ui-bundle.json'), JSON.stringify({ outputDir }));
+
+      const result = checkBundles([join(metadataRoot, 'uiBundles')]);
+
+      expect(result.diagnostics).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: 'MF-META-003',
+            status: 'FAIL',
+          }),
+        ])
+      );
+    }
+  );
+
+  it('passes when outputDir is a nested bundle-relative path', () => {
+    const bundlePath = join(metadataRoot, 'uiBundles', 'MfLab');
+    const outputPath = join(bundlePath, 'build', 'client');
+
+    createValidBundle(bundlePath);
+    mkdirSync(outputPath, { recursive: true });
+    writeFileSync(join(outputPath, 'index.html'), '<div id="root"></div>');
+    writeFileSync(
+      join(bundlePath, 'ui-bundle.json'),
+      JSON.stringify({ outputDir: 'build/client' })
+    );
+
+    const result = checkBundles([join(metadataRoot, 'uiBundles')]);
+
+    expect(result.diagnostics.some((diagnostic) => diagnostic.status === 'FAIL')).toBe(
+      false
+    );
+  });
+
+  it('matches SDR by treating a leading forward slash as bundle-relative', () => {
+    const bundlePath = join(metadataRoot, 'uiBundles', 'MfLab');
+
+    createValidBundle(bundlePath);
+    writeFileSync(
+      join(bundlePath, 'ui-bundle.json'),
+      JSON.stringify({ outputDir: '/dist' })
+    );
+
+    const result = checkBundles([join(metadataRoot, 'uiBundles')]);
+
+    expect(result.diagnostics.some((diagnostic) => diagnostic.status === 'FAIL')).toBe(
+      false
+    );
+  });
+
+  it('fails when UIBundle metadata is missing', () => {
+    const bundlePath = join(metadataRoot, 'uiBundles', 'MfLab');
+
+    createValidBundle(bundlePath);
+    rmSync(join(bundlePath, 'MfLab.uibundle-meta.xml'));
+
+    const result = checkBundles([join(metadataRoot, 'uiBundles')]);
+
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'MF-META-012',
+          status: 'FAIL',
+        }),
+      ])
+    );
+  });
+
+  it('fails when UIBundle metadata contains invalid XML', () => {
+    const bundlePath = join(metadataRoot, 'uiBundles', 'MfLab');
+
+    createValidBundle(bundlePath);
+    writeFileSync(
+      join(bundlePath, 'MfLab.uibundle-meta.xml'),
+      '<UIBundle><target>CustomApplication</target>'
+    );
+
+    const result = checkBundles([join(metadataRoot, 'uiBundles')]);
+
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'MF-META-013',
+          status: 'FAIL',
+        }),
+      ])
+    );
+  });
+
+  it('fails when UIBundle metadata has a different root element', () => {
+    const bundlePath = join(metadataRoot, 'uiBundles', 'MfLab');
+
+    createValidBundle(bundlePath);
+    writeFileSync(
+      join(bundlePath, 'MfLab.uibundle-meta.xml'),
+      `<?xml version="1.0" encoding="UTF-8"?>
+      <CustomApplication xmlns="http://soap.sforce.com/2006/04/metadata">
+        <uiType>Lightning</uiType>
+      </CustomApplication>`
+    );
+
+    const result = checkBundles([join(metadataRoot, 'uiBundles')]);
+
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'MF-META-014',
+          status: 'FAIL',
+        }),
+      ])
+    );
+  });
+
+  it('fails when UIBundle metadata uses the deprecated AppLauncher target', () => {
+    const bundlePath = join(metadataRoot, 'uiBundles', 'MfLab');
+
+    createValidBundle(bundlePath);
+    writeFileSync(
+      join(bundlePath, 'MfLab.uibundle-meta.xml'),
+      `<?xml version="1.0" encoding="UTF-8"?>
+      <UIBundle xmlns="http://soap.sforce.com/2006/04/metadata">
+        <masterLabel>MfLab</masterLabel>
+        <target>AppLauncher</target>
+      </UIBundle>`
+    );
+
+    const result = checkBundles([join(metadataRoot, 'uiBundles')]);
+
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'MF-META-017',
+          status: 'FAIL',
+        }),
       ])
     );
   });
@@ -58,18 +239,12 @@ describe('checkBundles', () => {
   it('fails when the configured output directory does not exist', () => {
     const bundlePath = join(metadataRoot, 'uiBundles', 'MfLab');
 
-    mkdirSync(bundlePath, {
+    createValidBundle(bundlePath);
+    rmSync(join(bundlePath, 'dist'), {
       recursive: true,
     });
 
-    writeFileSync(
-      join(bundlePath, 'ui-bundle.json'),
-      JSON.stringify({
-        outputDir: 'dist',
-      })
-    );
-
-    const result = checkBundles([metadataRoot]);
+    const result = checkBundles([join(metadataRoot, 'uiBundles')]);
 
     expect(result.diagnostics).toEqual(
       expect.arrayContaining([
@@ -81,16 +256,153 @@ describe('checkBundles', () => {
     );
   });
 
+  it('fails when the configured output path is a file', () => {
+    const bundlePath = join(metadataRoot, 'uiBundles', 'MfLab');
+
+    createValidBundle(bundlePath);
+    rmSync(join(bundlePath, 'dist'), { recursive: true });
+    writeFileSync(join(bundlePath, 'dist'), 'not a directory');
+
+    const result = checkBundles([join(metadataRoot, 'uiBundles')]);
+
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'MF-META-005',
+          status: 'FAIL',
+        }),
+      ])
+    );
+  });
+
+  it('fails when the output directory contains no deployable content', () => {
+    const bundlePath = join(metadataRoot, 'uiBundles', 'MfLab');
+
+    createValidBundle(bundlePath);
+    rmSync(join(bundlePath, 'dist', 'index.html'));
+
+    const result = checkBundles([join(metadataRoot, 'uiBundles')]);
+
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'MF-META-016',
+          status: 'FAIL',
+        }),
+      ])
+    );
+  });
+
+  it('counts a file ending in -meta.xml as deployable content', () => {
+    const bundlePath = join(metadataRoot, 'uiBundles', 'MfLab');
+    const outputPath = join(bundlePath, 'dist');
+
+    createValidBundle(bundlePath);
+    rmSync(join(outputPath, 'index.html'));
+    writeFileSync(join(outputPath, 'something-meta.xml'), '<content />');
+
+    const result = checkBundles([join(metadataRoot, 'uiBundles')]);
+
+    expect(result.diagnostics).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'MF-META-016',
+        }),
+      ])
+    );
+  });
+
+  it('counts a file named ui-bundle.json as deployable content', () => {
+    const bundlePath = join(metadataRoot, 'uiBundles', 'MfLab');
+    const outputPath = join(bundlePath, 'dist');
+
+    createValidBundle(bundlePath);
+    rmSync(join(outputPath, 'index.html'));
+    writeFileSync(join(outputPath, 'ui-bundle.json'), '{}');
+
+    const result = checkBundles([join(metadataRoot, 'uiBundles')]);
+
+    expect(result.diagnostics).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'MF-META-016',
+        }),
+      ])
+    );
+  });
+
+  it('follows a symbolic link to deployable content', () => {
+    const bundlePath = join(metadataRoot, 'uiBundles', 'MfLab');
+    const outputPath = join(bundlePath, 'dist');
+    const linkedContentPath = join(projectPath, 'linked-content');
+
+    createValidBundle(bundlePath);
+    rmSync(join(outputPath, 'index.html'));
+    mkdirSync(linkedContentPath);
+    writeFileSync(join(linkedContentPath, 'index.html'), '<div id="root"></div>');
+    symlinkSync(
+      linkedContentPath,
+      join(outputPath, 'linked-content'),
+      process.platform === 'win32' ? 'junction' : 'dir'
+    );
+
+    const result = checkBundles([join(metadataRoot, 'uiBundles')]);
+
+    expect(result.diagnostics).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'MF-META-016',
+        }),
+      ])
+    );
+  });
+
+  it('finds deployable content within the SDR recursion depth limit', () => {
+    const bundlePath = join(metadataRoot, 'uiBundles', 'MfLab');
+    const outputPath = join(bundlePath, 'dist');
+
+    createValidBundle(bundlePath);
+    rmSync(join(outputPath, 'index.html'));
+    createNestedContent(outputPath, 19);
+
+    const result = checkBundles([join(metadataRoot, 'uiBundles')]);
+
+    expect(result.diagnostics).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'MF-META-016',
+        }),
+      ])
+    );
+  });
+
+  it('does not inspect deployable content at SDR recursion depth 20', () => {
+    const bundlePath = join(metadataRoot, 'uiBundles', 'MfLab');
+    const outputPath = join(bundlePath, 'dist');
+
+    createValidBundle(bundlePath);
+    rmSync(join(outputPath, 'index.html'));
+    createNestedContent(outputPath, 20);
+
+    const result = checkBundles([join(metadataRoot, 'uiBundles')]);
+
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'MF-META-016',
+          status: 'FAIL',
+        }),
+      ])
+    );
+  });
+
   it('fails when ui-bundle.json contains invalid JSON', () => {
     const bundlePath = join(metadataRoot, 'uiBundles', 'MfLab');
 
-    mkdirSync(bundlePath, {
-      recursive: true,
-    });
-
+    createValidBundle(bundlePath);
     writeFileSync(join(bundlePath, 'ui-bundle.json'), '{ invalid json');
 
-    const result = checkBundles([metadataRoot]);
+    const result = checkBundles([join(metadataRoot, 'uiBundles')]);
 
     expect(result.diagnostics).toEqual(
       expect.arrayContaining([
@@ -111,18 +423,12 @@ describe('checkBundles', () => {
 
     const bundlePath = join(secondMetadataRoot, 'uiBundles', 'MfLab');
 
-    mkdirSync(join(bundlePath, 'dist'), {
-      recursive: true,
-    });
+    createValidBundle(bundlePath);
 
-    writeFileSync(
-      join(bundlePath, 'ui-bundle.json'),
-      JSON.stringify({
-        outputDir: 'dist',
-      })
-    );
-
-    const result = checkBundles([metadataRoot, secondMetadataRoot]);
+    const result = checkBundles([
+      join(metadataRoot, 'uiBundles'),
+      join(secondMetadataRoot, 'uiBundles'),
+    ]);
 
     expect(result.bundles).toEqual(['MfLab']);
 
@@ -143,7 +449,10 @@ describe('checkBundles', () => {
       recursive: true,
     });
 
-    const result = checkBundles([metadataRoot, secondMetadataRoot]);
+    const result = checkBundles([
+      join(metadataRoot, 'uiBundles'),
+      join(secondMetadataRoot, 'uiBundles'),
+    ]);
 
     expect(result.diagnostics).toEqual(
       expect.arrayContaining([

@@ -7,6 +7,7 @@ export type DiagnosticResult = {
   id: string;
   category: DiagnosticCategory;
   status: DiagnosticStatus;
+  blocksReadiness?: boolean;
 
   summary: string;
 

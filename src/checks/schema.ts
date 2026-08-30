@@ -1,5 +1,5 @@
 import { findGraphqlFiles } from '../utils/files.js';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import {
@@ -7,8 +7,19 @@ import {
   type SalesforceSchemaRuntimeInfo,
 } from '../salesforce/schema.js';
 
-import { buildClientSchema, parse, validate } from 'graphql';
+import {
+  buildClientSchema,
+  getLocation,
+  GraphQLError,
+  Kind,
+  parse,
+  Source,
+  validate,
+  type DefinitionNode,
+  type DocumentNode,
+} from 'graphql';
 import type { DiagnosticResult } from '../diagnostics/types.js';
+import { resolveUiBundleOutputPath } from '../utils/uiBundleOutput.js';
 
 export type SchemaCheckRuntimeInfo = SalesforceSchemaRuntimeInfo & {
   schemaProcessingMs?: number;
@@ -19,9 +30,32 @@ type SchemaCheckResult = {
   runtime?: SchemaCheckRuntimeInfo;
 };
 
+function getUiBundleOutputPath(bundlePath: string): string | undefined {
+  const configPath = join(bundlePath, 'ui-bundle.json');
+
+  if (!existsSync(configPath)) {
+    return undefined;
+  }
+
+  try {
+    const config = JSON.parse(readFileSync(configPath, 'utf-8')) as {
+      outputDir?: unknown;
+    };
+
+    if (typeof config.outputDir !== 'string' || !config.outputDir) {
+      return undefined;
+    }
+
+    return resolveUiBundleOutputPath(bundlePath, config.outputDir);
+  } catch {
+    // Bundle validation reports invalid descriptors and outputDir paths.
+    return undefined;
+  }
+}
+
 export async function checkSchema(
   projectPath: string,
-  metadataRoots: string[],
+  uiBundlesPaths: string[],
   apiVersion: string | undefined,
   targetOrg: string,
   refresh = false,
@@ -65,73 +99,157 @@ export async function checkSchema(
       ...(schemaProcessingMs !== undefined ? { schemaProcessingMs } : {}),
     };
 
-    const graphqlFiles = metadataRoots.flatMap((metadataRoot) => {
-      const uiBundlesPath = join(metadataRoot, 'uiBundles');
-
+    const graphqlBundles = uiBundlesPaths.flatMap((uiBundlesPath) => {
       if (!existsSync(uiBundlesPath)) {
         return [];
       }
 
-      return findGraphqlFiles(uiBundlesPath);
+      return readdirSync(uiBundlesPath, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => {
+          const bundlePath = join(uiBundlesPath, entry.name);
+          const outputPath = getUiBundleOutputPath(bundlePath);
+
+          return {
+            files: findGraphqlFiles(bundlePath, outputPath ? [outputPath] : []),
+          };
+        });
     });
 
-    if (graphqlFiles.length === 0) {
-      diagnostics.push({
-        id: 'MF-GRAPHQL-002',
-        category: 'data',
-        status: 'PASS',
-        summary: 'No .graphql operations found',
-      });
+    let executableDefinitionCount = 0;
+    let parseFailureCount = 0;
 
-      return {
-        diagnostics,
-        runtime,
+    for (const bundle of graphqlBundles) {
+      const executableDefinitions: DefinitionNode[] = [];
+      const executableFiles = new Set<string>();
+
+      for (const filePath of bundle.files) {
+        const displayPath = relative(projectPath, filePath);
+
+        try {
+          const source = new Source(readFileSync(filePath, 'utf-8'), filePath);
+          const document = parse(source);
+
+          for (const definition of document.definitions) {
+            if (
+              definition.kind !== Kind.OPERATION_DEFINITION &&
+              definition.kind !== Kind.FRAGMENT_DEFINITION
+            ) {
+              continue;
+            }
+
+            executableDefinitions.push(definition);
+            executableFiles.add(filePath);
+            executableDefinitionCount += 1;
+          }
+        } catch (error) {
+          parseFailureCount += 1;
+
+          diagnostics.push({
+            id: 'MF-GRAPHQL-005',
+            category: 'data',
+            status: 'FAIL',
+            summary: `${displayPath}: GraphQL operation could not be checked`,
+            problem: error instanceof Error ? error.message : String(error),
+            file: filePath,
+            ...(error instanceof GraphQLError && error.locations?.[0]
+              ? { line: error.locations[0].line }
+              : {}),
+          });
+        }
+      }
+
+      if (executableDefinitions.length === 0) {
+        continue;
+      }
+
+      const executableDocument: DocumentNode = {
+        kind: Kind.DOCUMENT,
+        definitions: executableDefinitions,
       };
-    }
+      const validationErrors = validate(liveGraphqlSchema, executableDocument);
 
-    for (const filePath of graphqlFiles) {
-      const displayPath = relative(projectPath, filePath);
-
-      try {
-        const source = readFileSync(filePath, 'utf-8');
-        const document = parse(source);
-        const errors = validate(liveGraphqlSchema, document);
-
-        if (errors.length === 0) {
+      if (validationErrors.length === 0) {
+        for (const filePath of executableFiles) {
           diagnostics.push({
             id: 'MF-GRAPHQL-003',
             category: 'data',
             status: 'PASS',
-            summary: `${displayPath}: valid against target org schema`,
+            summary: `${relative(projectPath, filePath)}: valid against target org schema`,
             file: filePath,
           });
-
-          continue;
         }
 
+        continue;
+      }
+
+      const errorsByFile = new Map<
+        string,
+        {
+          messages: Set<string>;
+          line?: number;
+        }
+      >();
+
+      for (const validationError of validationErrors) {
+        const associatedFiles = new Set<string>();
+
+        for (const node of validationError.nodes ?? []) {
+          if (!node.loc) {
+            continue;
+          }
+
+          const filePath = node.loc.source.name;
+          associatedFiles.add(filePath);
+
+          const existing = errorsByFile.get(filePath) ?? {
+            messages: new Set<string>(),
+          };
+
+          existing.messages.add(validationError.message);
+          existing.line ??= getLocation(node.loc.source, node.loc.start).line;
+          errorsByFile.set(filePath, existing);
+        }
+
+        if (associatedFiles.size === 0) {
+          const fallbackFile = executableFiles.values().next().value;
+
+          if (fallbackFile) {
+            const existing = errorsByFile.get(fallbackFile) ?? {
+              messages: new Set<string>(),
+            };
+
+            existing.messages.add(validationError.message);
+            errorsByFile.set(fallbackFile, existing);
+          }
+        }
+      }
+
+      for (const [filePath, fileErrors] of errorsByFile) {
         diagnostics.push({
           id: 'MF-GRAPHQL-004',
           category: 'data',
           status: 'FAIL',
-          summary: `${displayPath}: invalid against target org schema`,
-          problem: errors.map((error) => error.message).join('\n'),
+          summary: `${relative(projectPath, filePath)}: invalid against target org schema`,
+          problem: [...fileErrors.messages].join('\n'),
           possibleCauses: [
             'The referenced field or type may not exist in the target org.',
             'The authenticated user may not have access to the referenced field or type.',
             'The wrong target org may be selected.',
           ],
           file: filePath,
-        });
-      } catch (error) {
-        diagnostics.push({
-          id: 'MF-GRAPHQL-005',
-          category: 'data',
-          status: 'FAIL',
-          summary: `${displayPath}: GraphQL operation could not be checked`,
-          problem: error instanceof Error ? error.message : String(error),
-          file: filePath,
+          ...(fileErrors.line !== undefined ? { line: fileErrors.line } : {}),
         });
       }
+    }
+
+    if (executableDefinitionCount === 0 && parseFailureCount === 0) {
+      diagnostics.push({
+        id: 'MF-GRAPHQL-002',
+        category: 'data',
+        status: 'PASS',
+        summary: 'No .graphql operations found',
+      });
     }
 
     return {
