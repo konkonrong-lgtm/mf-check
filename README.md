@@ -15,10 +15,11 @@ you're deploying to.
 
 Currently:
 
+- Salesforce project discovery from `sfdx-project.json` package directories
 - UI Bundle configuration and build output
 - CustomApplication → UI Bundle linkage
 - whether the CustomApplication is a Lightning app
-- Permission Set application visibility
+- application visibility through Permission Sets or Profiles
 - `.graphql` operations against the target org's GraphQL schema
 
 Live schema results are cached for 5 minutes because Salesforce introspection

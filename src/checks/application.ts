@@ -1,88 +1,153 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { XMLParser } from 'fast-xml-parser';
+import { XMLParser, XMLValidator } from 'fast-xml-parser';
 
-export function checkApplications(projectPath: string, bundles: string[]) {
-  let hasError = false;
+import type { DiagnosticResult } from '../diagnostics/types.js';
 
-  const applicationsPath = join(
-    projectPath,
-    'force-app',
-    'main',
-    'default',
-    'applications'
-  );
+type ApplicationCheckResult = {
+  applicationNames: string[];
+  diagnostics: DiagnosticResult[];
+};
 
-  if (!existsSync(applicationsPath)) {
-    console.error('✗ applications directory not found.');
+export function checkApplications(
+  metadataRoots: string[],
+  bundles: string[]
+): ApplicationCheckResult {
+  const diagnostics: DiagnosticResult[] = [];
+
+  if (metadataRoots.length === 0) {
     return {
-      hasError: true,
-      applicationNames: [] as string[],
+      applicationNames: [],
+      diagnostics,
     };
   }
 
-  const applicationFiles = readdirSync(applicationsPath).filter((file) =>
-    file.endsWith('.app-meta.xml')
-  );
+  const applicationPaths = metadataRoots
+    .map((metadataRoot) => join(metadataRoot, 'applications'))
+    .filter((applicationsPath) => existsSync(applicationsPath));
+
+  if (applicationPaths.length === 0) {
+    diagnostics.push({
+      id: 'MF-PROJECT-005',
+      category: 'project',
+      status: 'FAIL',
+      summary: 'applications directory not found',
+      problem:
+        'None of the project package directories contain an applications directory.',
+    });
+
+    return {
+      applicationNames: [],
+      diagnostics,
+    };
+  }
 
   const parser = new XMLParser();
   const linkedBundles = new Set<string>();
-  const applicationNames: string[] = [];
+  const applicationNames = new Set<string>();
 
-  for (const file of applicationFiles) {
-    const filePath = join(applicationsPath, file);
-    const appName = file.replace('.app-meta.xml', '');
+  for (const applicationsPath of applicationPaths) {
+    const applicationFiles = readdirSync(applicationsPath).filter((file) =>
+      file.endsWith('.app-meta.xml')
+    );
 
-    let parsed;
+    for (const file of applicationFiles) {
+      const filePath = join(applicationsPath, file);
+      const appName = file.replace('.app-meta.xml', '');
 
-    try {
-      const xml = readFileSync(filePath, 'utf-8');
-      parsed = parser.parse(xml);
-    } catch {
-      console.error(`✗ ${appName}: could not parse application metadata`);
-      hasError = true;
-      continue;
+      try {
+        const xml = readFileSync(filePath, 'utf-8');
+
+        const validationResult = XMLValidator.validate(xml);
+
+        if (validationResult !== true) {
+          diagnostics.push({
+            id: 'MF-META-007',
+            category: 'metadata',
+            status: 'FAIL',
+            summary: `${appName}: application metadata is invalid XML`,
+            problem: validationResult.err.msg,
+            file: filePath,
+          });
+
+          continue;
+        }
+
+        const parsed = parser.parse(xml);
+
+        const uiBundle = parsed?.CustomApplication?.uiBundle;
+
+        if (!uiBundle) {
+          continue;
+        }
+
+        const uiType = parsed?.CustomApplication?.uiType;
+
+        if (uiType !== 'Lightning') {
+          diagnostics.push({
+            id: 'MF-META-008',
+            category: 'metadata',
+            status: 'FAIL',
+            summary: `${appName}: invalid uiType`,
+            problem: `The application "${appName}" must use uiType "Lightning", but found "${uiType ?? 'missing'}".`,
+            file: filePath,
+          });
+
+          continue;
+        }
+
+        const bundleName = String(uiBundle).replace(/^c__/, '');
+
+        if (!bundles.includes(bundleName)) {
+          diagnostics.push({
+            id: 'MF-META-009',
+            category: 'metadata',
+            status: 'FAIL',
+            summary: `${appName}: references missing UI Bundle "${uiBundle}"`,
+            problem: `The application "${appName}" references UI Bundle "${uiBundle}", but that bundle was not found locally.`,
+            file: filePath,
+          });
+
+          continue;
+        }
+
+        applicationNames.add(appName);
+        linkedBundles.add(bundleName);
+
+        diagnostics.push({
+          id: 'MF-META-010',
+          category: 'metadata',
+          status: 'PASS',
+          summary: `${appName}: linked to UI Bundle ${uiBundle}`,
+          file: filePath,
+        });
+      } catch (error) {
+        diagnostics.push({
+          id: 'MF-META-007',
+          category: 'metadata',
+          status: 'FAIL',
+          summary: `${appName}: could not read application metadata`,
+          problem: error instanceof Error ? error.message : String(error),
+          file: filePath,
+        });
+      }
     }
-
-    const uiBundle = parsed.CustomApplication?.uiBundle;
-
-    if (!uiBundle) {
-      continue;
-    }
-
-    const uiType = parsed.CustomApplication?.uiType;
-
-    if (uiType !== 'Lightning') {
-      console.error(
-        `✗ ${appName}: UI Bundle app must use uiType "Lightning" (found: ${uiType ?? 'missing'})`
-      );
-      hasError = true;
-      continue;
-    }
-
-    const bundleName = String(uiBundle).replace(/^c__/, '');
-
-    if (!bundles.includes(bundleName)) {
-      console.error(`✗ ${appName}: references missing UI Bundle "${uiBundle}"`);
-      hasError = true;
-      continue;
-    }
-
-    applicationNames.push(appName);
-    linkedBundles.add(bundleName);
-
-    console.log(`✓ ${appName}: Lightning app linked to UI Bundle ${uiBundle}`);
   }
 
   for (const bundle of bundles) {
     if (!linkedBundles.has(bundle)) {
-      console.error(`✗ ${bundle}: no CustomApplication references this UI Bundle`);
-      hasError = true;
+      diagnostics.push({
+        id: 'MF-META-011',
+        category: 'metadata',
+        status: 'FAIL',
+        summary: `${bundle}: no CustomApplication references this UI Bundle`,
+        problem: `The UI Bundle "${bundle}" is not referenced by any CustomApplication.`,
+      });
     }
   }
 
   return {
-    hasError,
-    applicationNames,
+    applicationNames: [...applicationNames],
+    diagnostics,
   };
 }

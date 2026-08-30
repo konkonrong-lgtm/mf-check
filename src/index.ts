@@ -3,7 +3,13 @@
 import { checkBundles } from './checks/bundle.js';
 import { checkApplications } from './checks/application.js';
 import { checkPermissionSets } from './checks/permissionSet.js';
-import { checkSchema } from './checks/schema.js';
+import { checkProfiles } from './checks/profile.js';
+import { checkAppAccess } from './checks/appAccess.js';
+import { discoverProject } from './project/discovery.js';
+import { checkSchema, type SchemaCheckRuntimeInfo } from './checks/schema.js';
+import type { DiagnosticResult } from './diagnostics/types.js';
+import { hasFailures } from './diagnostics/result.js';
+import { renderCheckResults } from './renderers/checkRenderer.js';
 
 const args = process.argv.slice(2);
 
@@ -39,32 +45,66 @@ if (refresh && !targetOrg) {
   process.exit(1);
 }
 
-console.log(`Checking project: ${projectPath}`);
+const discoveryResult = discoverProject(projectPath);
+const metadataRoots = discoveryResult.metadataRoots;
 
-const bundleResult = checkBundles(projectPath);
-const applicationResult = checkApplications(projectPath, bundleResult.bundles);
-const permissionSetResult = checkPermissionSets(
-  projectPath,
-  applicationResult.applicationNames
+const bundleResult = checkBundles(metadataRoots);
+
+const applicationResult = checkApplications(metadataRoots, bundleResult.bundles);
+
+const permissionSetResult = checkPermissionSets(metadataRoots);
+
+const profileResult = checkProfiles(metadataRoots);
+
+const appAccessResult = checkAppAccess(
+  applicationResult.applicationNames,
+  permissionSetResult.visibleApplications,
+  profileResult.visibleApplications
 );
 
-let schemaResult = { hasError: false };
+let schemaDiagnostics: DiagnosticResult[] = [];
+let schemaRuntime: SchemaCheckRuntimeInfo | undefined;
 
 if (targetOrg) {
-  schemaResult = await checkSchema(projectPath, targetOrg, refresh, debug);
-} else {
-  console.log('○ Live GraphQL check skipped: no --target-org provided');
-}
+  const schemaResult = await checkSchema(
+    projectPath,
+    metadataRoots,
+    discoveryResult.sourceApiVersion,
+    targetOrg,
+    refresh,
+    debug
+  );
 
-const hasError =
-  bundleResult.hasError ||
-  applicationResult.hasError ||
-  permissionSetResult.hasError ||
-  schemaResult.hasError;
+  schemaDiagnostics = schemaResult.diagnostics;
+  schemaRuntime = schemaResult.runtime;
+} else {
+  schemaDiagnostics.push({
+    id: 'MF-GRAPHQL-007',
+    category: 'data',
+    status: 'UNKNOWN',
+    summary: 'Live GraphQL check skipped: no target org provided',
+    problem:
+      'The target org was not provided, so live GraphQL validation was not performed.',
+  });
+}
+const diagnostics = [
+  ...discoveryResult.diagnostics,
+  ...bundleResult.diagnostics,
+  ...applicationResult.diagnostics,
+  ...permissionSetResult.diagnostics,
+  ...profileResult.diagnostics,
+  ...appAccessResult.diagnostics,
+  ...schemaDiagnostics,
+];
+
+const hasError = hasFailures(diagnostics);
+
+renderCheckResults(diagnostics, {
+  projectPath,
+  hasError,
+  ...(schemaRuntime ? { schemaRuntime } : {}),
+});
 
 if (hasError) {
-  console.log('\nNOT READY');
   process.exitCode = 1;
-} else {
-  console.log('\nREADY');
 }

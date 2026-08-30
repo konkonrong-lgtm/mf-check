@@ -1,32 +1,29 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { checkApplications } from './application.js';
 
 describe('checkApplications', () => {
   let projectPath: string;
+  let metadataRoot: string;
   let applicationsPath: string;
 
   beforeEach(() => {
     projectPath = mkdtempSync(join(tmpdir(), 'mf-check-'));
 
-    applicationsPath = join(projectPath, 'force-app', 'main', 'default', 'applications');
+    metadataRoot = join(projectPath, 'src', 'main', 'default');
+
+    applicationsPath = join(metadataRoot, 'applications');
 
     mkdirSync(applicationsPath, {
       recursive: true,
     });
-
-    vi.spyOn(console, 'log').mockImplementation(() => {});
-    vi.spyOn(console, 'error').mockImplementation(() => {});
   });
 
   afterEach(() => {
-    vi.restoreAllMocks();
-
     rmSync(projectPath, {
       recursive: true,
       force: true,
@@ -38,16 +35,23 @@ describe('checkApplications', () => {
       join(applicationsPath, 'MfLabReact.app-meta.xml'),
       `<?xml version="1.0" encoding="UTF-8"?>
       <CustomApplication xmlns="http://soap.sforce.com/2006/04/metadata">
-      <uiType>Lightning</uiType>
-      <uiBundle>c__MfLab</uiBundle>
+        <uiType>Lightning</uiType>
+        <uiBundle>c__MfLab</uiBundle>
       </CustomApplication>`
     );
 
-    const result = checkApplications(projectPath, ['MfLab']);
-
-    expect(result.hasError).toBe(false);
+    const result = checkApplications([metadataRoot], ['MfLab']);
 
     expect(result.applicationNames).toEqual(['MfLabReact']);
+
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'MF-META-010',
+          status: 'PASS',
+        }),
+      ])
+    );
   });
 
   it('fails when an application is not Lightning', () => {
@@ -55,14 +59,21 @@ describe('checkApplications', () => {
       join(applicationsPath, 'MfLabReact.app-meta.xml'),
       `<?xml version="1.0" encoding="UTF-8"?>
       <CustomApplication xmlns="http://soap.sforce.com/2006/04/metadata">
-      <uiType>Classic</uiType>
-      <uiBundle>c__MfLab</uiBundle>
+        <uiType>Classic</uiType>
+        <uiBundle>c__MfLab</uiBundle>
       </CustomApplication>`
     );
 
-    const result = checkApplications(projectPath, ['MfLab']);
+    const result = checkApplications([metadataRoot], ['MfLab']);
 
-    expect(result.hasError).toBe(true);
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'MF-META-008',
+          status: 'FAIL',
+        }),
+      ])
+    );
   });
 
   it('fails when an application points to an unknown UI Bundle', () => {
@@ -70,23 +81,94 @@ describe('checkApplications', () => {
       join(applicationsPath, 'MfLabReact.app-meta.xml'),
       `<?xml version="1.0" encoding="UTF-8"?>
       <CustomApplication xmlns="http://soap.sforce.com/2006/04/metadata">
-      <uiType>Lightning</uiType>
-      <uiBundle>c__UnknownBundle</uiBundle>
+        <uiType>Lightning</uiType>
+        <uiBundle>c__UnknownBundle</uiBundle>
       </CustomApplication>`
     );
 
-    const result = checkApplications(projectPath, ['MfLab']);
+    const result = checkApplications([metadataRoot], ['MfLab']);
 
-    expect(result.hasError).toBe(true);
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'MF-META-009',
+          status: 'FAIL',
+        }),
+      ])
+    );
   });
 
-  it('fails when application metadata cannot be parsed', () => {
+  it('fails when application metadata contains invalid XML', () => {
     writeFileSync(
       join(applicationsPath, 'MfLabReact.app-meta.xml'),
       '<CustomApplication><uiBundle>'
     );
 
-    const result = checkApplications(projectPath, ['MfLab']);
-    expect(result.hasError).toBe(true);
+    const result = checkApplications([metadataRoot], ['MfLab']);
+
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'MF-META-007',
+          status: 'FAIL',
+        }),
+      ])
+    );
+  });
+
+  it('finds applications across multiple metadata roots', () => {
+    const secondMetadataRoot = join(projectPath, 'feature', 'main', 'default');
+
+    const secondApplicationsPath = join(secondMetadataRoot, 'applications');
+
+    mkdirSync(secondApplicationsPath, {
+      recursive: true,
+    });
+
+    writeFileSync(
+      join(secondApplicationsPath, 'MfLabReact.app-meta.xml'),
+      `<?xml version="1.0" encoding="UTF-8"?>
+      <CustomApplication xmlns="http://soap.sforce.com/2006/04/metadata">
+        <uiType>Lightning</uiType>
+        <uiBundle>c__MfLab</uiBundle>
+      </CustomApplication>`
+    );
+
+    const result = checkApplications([metadataRoot, secondMetadataRoot], ['MfLab']);
+
+    expect(result.applicationNames).toEqual(['MfLabReact']);
+
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'MF-META-010',
+          status: 'PASS',
+        }),
+      ])
+    );
+  });
+
+  it('fails when no metadata root contains applications', () => {
+    rmSync(applicationsPath, {
+      recursive: true,
+      force: true,
+    });
+
+    const secondMetadataRoot = join(projectPath, 'feature', 'main', 'default');
+
+    mkdirSync(secondMetadataRoot, {
+      recursive: true,
+    });
+
+    const result = checkApplications([metadataRoot, secondMetadataRoot], ['MfLab']);
+
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'MF-PROJECT-005',
+          status: 'FAIL',
+        }),
+      ])
+    );
   });
 });

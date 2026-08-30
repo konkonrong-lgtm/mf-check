@@ -1,72 +1,57 @@
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { XMLParser } from 'fast-xml-parser';
 
-export function checkPermissionSets(projectPath: string, applicationNames: string[]) {
-  if (applicationNames.length === 0) {
-    return { hasError: false };
-  }
+import type { DiagnosticResult } from '../diagnostics/types.js';
+import { readVisibleApplications } from '../access/applicationVisibility.js';
 
-  let hasError = false;
+type PermissionSetCheckResult = {
+  diagnostics: DiagnosticResult[];
+  visibleApplications: string[];
+};
 
-  const permissionSetsPath = join(
-    projectPath,
-    'force-app',
-    'main',
-    'default',
-    'permissionsets'
-  );
-
-  if (!existsSync(permissionSetsPath)) {
-    console.error('✗ permissionsets directory not found.');
-    return { hasError: true };
-  }
-
-  const permissionSetFiles = readdirSync(permissionSetsPath).filter((file) =>
-    file.endsWith('.permissionset-meta.xml')
-  );
-
-  const parser = new XMLParser();
+export function checkPermissionSets(metadataRoots: string[]): PermissionSetCheckResult {
+  const diagnostics: DiagnosticResult[] = [];
   const visibleApplications = new Set<string>();
+  if (metadataRoots.length === 0) {
+    return {
+      visibleApplications: [...visibleApplications],
+      diagnostics,
+    };
+  }
 
-  for (const file of permissionSetFiles) {
-    const filePath = join(permissionSetsPath, file);
+  const permissionSetsPaths = metadataRoots
+    .map((metadataRoot) => join(metadataRoot, 'permissionsets'))
+    .filter((permissionSetsPath) => existsSync(permissionSetsPath));
 
-    let parsed;
+  for (const permissionSetsPath of permissionSetsPaths) {
+    const permissionSetFiles = readdirSync(permissionSetsPath).filter((file) =>
+      file.endsWith('.permissionset-meta.xml')
+    );
 
-    try {
-      const xml = readFileSync(filePath, 'utf-8');
-      parsed = parser.parse(xml);
-    } catch {
-      console.error(`✗ ${file}: could not parse PermissionSet metadata`);
-      hasError = true;
-      continue;
-    }
+    for (const file of permissionSetFiles) {
+      const filePath = join(permissionSetsPath, file);
 
-    const visibilities = parsed.PermissionSet?.applicationVisibilities;
+      try {
+        const applications = readVisibleApplications(filePath, 'PermissionSet');
 
-    if (!visibilities) {
-      continue;
-    }
-
-    const visibilityList = Array.isArray(visibilities) ? visibilities : [visibilities];
-
-    for (const visibility of visibilityList) {
-      if (visibility.visible === true && visibility.application) {
-        visibleApplications.add(String(visibility.application));
+        for (const application of applications) {
+          visibleApplications.add(application);
+        }
+      } catch (error) {
+        diagnostics.push({
+          id: 'MF-ACCESS-002',
+          category: 'access',
+          status: 'FAIL',
+          summary: `${file}: could not parse PermissionSet metadata`,
+          problem: error instanceof Error ? error.message : String(error),
+          file: filePath,
+        });
       }
     }
   }
 
-  for (const appName of applicationNames) {
-    if (!visibleApplications.has(appName)) {
-      console.error(`✗ ${appName}: no PermissionSet grants application visibility`);
-      hasError = true;
-      continue;
-    }
-
-    console.log(`✓ ${appName}: application visibility granted by PermissionSet`);
-  }
-
-  return { hasError };
+  return {
+    visibleApplications: [...visibleApplications],
+    diagnostics,
+  };
 }
