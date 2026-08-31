@@ -7,6 +7,7 @@ import { checkProfiles } from './checks/profile.js';
 import { checkAppAccess } from './checks/appAccess.js';
 import { discoverProject } from './project/discovery.js';
 import { checkSchema, type SchemaCheckRuntimeInfo } from './checks/schema.js';
+import { checkGaMigration } from './checks/gaMigration.js';
 import type { DiagnosticResult } from './diagnostics/types.js';
 import { hasFailures, hasReadinessBlockers } from './diagnostics/result.js';
 import { renderCheckResults } from './renderers/checkRenderer.js';
@@ -52,6 +53,7 @@ const metadataRoots = discoveryResult.metadataRoots;
 const uiBundlesPaths = discoveryResult.uiBundlesPaths;
 
 const bundleResult = checkBundles(uiBundlesPaths);
+const gaMigrationResult = checkGaMigration(projectPath, uiBundlesPaths);
 
 const applicationResult = checkApplications(metadataRoots, bundleResult.bundles);
 
@@ -89,12 +91,18 @@ if (!projectDiscoveryFailed) {
       summary: 'Live GraphQL check skipped: no target org provided',
       problem:
         'The target org was not provided, so live GraphQL validation was not performed.',
+      whyItMatters:
+        'Without a target org, mf-check cannot confirm that local GraphQL operations are compatible with the live Salesforce schema.',
+      remediation: [
+        'Provide a target org when you want mf-check to perform live GraphQL schema validation.',
+      ],
     });
   }
 }
 const diagnostics = [
   ...discoveryResult.diagnostics,
   ...bundleResult.diagnostics,
+  ...gaMigrationResult.diagnostics,
   ...applicationResult.diagnostics,
   ...permissionSetResult.diagnostics,
   ...profileResult.diagnostics,

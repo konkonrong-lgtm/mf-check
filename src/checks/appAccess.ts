@@ -27,9 +27,16 @@ export function checkAppAccess(
         status: 'UNKNOWN',
         blocksReadiness: true,
         summary: `${appName}: application access not confirmed`,
-        problem: `No PermissionSet or Profile in the project grants application visibility for "${appName}".`,
+        problem: `mf-check did not confirm application visibility for "${appName}" in the local PermissionSet or Profile metadata that it could inspect.`,
+        whyItMatters:
+          'Without confirmed application visibility, mf-check cannot establish that intended users can access this Multi-Framework application.',
         possibleCauses: [
+          'Some local PermissionSet or Profile metadata may not have been available for inspection.',
           'Application access may be configured only in the target org and not represented in the local project metadata.',
+        ],
+        remediation: [
+          'Add or retrieve a PermissionSet or Profile that grants visibility to this CustomApplication, then run mf-check again.',
+          'If access exists only in the target org, verify that configuration and bring the relevant access metadata into the project when possible.',
         ],
       });
 

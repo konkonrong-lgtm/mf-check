@@ -4,6 +4,7 @@ import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { checkAppAccess } from './appAccess.js';
 import { checkPermissionSets } from './permissionSet.js';
 
 describe('checkPermissionSets', () => {
@@ -99,6 +100,19 @@ describe('checkPermissionSets', () => {
         }),
       ])
     );
+
+    const accessResult = checkAppAccess(['MfLabReact'], result.visibleApplications, []);
+
+    expect(accessResult.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'MF-ACCESS-003',
+          status: 'UNKNOWN',
+          problem:
+            'mf-check did not confirm application visibility for "MfLabReact" in the local PermissionSet or Profile metadata that it could inspect.',
+        }),
+      ])
+    );
   });
 
   it('finds PermissionSets across multiple metadata roots', () => {
@@ -126,6 +140,40 @@ describe('checkPermissionSets', () => {
     expect(result.visibleApplications).toEqual(['MfLabReact']);
 
     expect(result.diagnostics).toEqual([]);
+  });
+
+  it('reports an unreadable permissionsets path and continues other metadata roots', () => {
+    rmSync(permissionSetsPath, { recursive: true, force: true });
+    writeFileSync(permissionSetsPath, 'not a directory');
+
+    const secondMetadataRoot = join(projectPath, 'feature', 'main', 'default');
+    const secondPermissionSetsPath = join(secondMetadataRoot, 'permissionsets');
+
+    mkdirSync(secondPermissionSetsPath, { recursive: true });
+    writeFileSync(
+      join(secondPermissionSetsPath, 'MfLab.permissionset-meta.xml'),
+      `<?xml version="1.0" encoding="UTF-8"?>
+      <PermissionSet xmlns="http://soap.sforce.com/2006/04/metadata">
+        <applicationVisibilities>
+          <application>MfLabReact</application>
+          <visible>true</visible>
+        </applicationVisibilities>
+      </PermissionSet>`
+    );
+
+    const result = checkPermissionSets([metadataRoot, secondMetadataRoot]);
+
+    expect(result.visibleApplications).toEqual(['MfLabReact']);
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'MF-ACCESS-006',
+          status: 'FAIL',
+          file: permissionSetsPath,
+          problem: expect.stringContaining('ENOTDIR'),
+        }),
+      ])
+    );
   });
 
   it('returns empty result when no metadata root contains permissionsets', () => {

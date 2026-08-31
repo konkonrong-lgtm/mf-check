@@ -1,8 +1,25 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+
+  return {
+    ...actual,
+    lstatSync: vi.fn(actual.lstatSync),
+    readdirSync: vi.fn(actual.readdirSync),
+  };
+});
 
 import { checkAppAccess } from '../checks/appAccess.js';
 import { checkApplications } from '../checks/application.js';
@@ -242,6 +259,9 @@ describe('discoverProject', () => {
     expect(result.metadataRoots).toEqual([expectedMetadataRoot]);
     expect(result.uiBundlesPaths).toEqual([join(expectedMetadataRoot, 'uiBundles')]);
     expect(result.uiBundlesPaths).not.toContain(unrelatedUiBundlesPath);
+    expect(
+      result.diagnostics.some((diagnostic) => diagnostic.id === 'MF-PROJECT-010')
+    ).toBe(false);
   });
 
   it('ignores build and dependency directories under main', () => {
@@ -293,5 +313,122 @@ describe('discoverProject', () => {
     expect(result.uiBundlesPaths).toEqual([uiBundlesPath]);
 
     expect(result.sourceApiVersion).toBe('67.0');
+  });
+
+  it('reports a diagnostic and continues when a package main directory cannot be enumerated', () => {
+    writeFileSync(
+      join(projectPath, 'sfdx-project.json'),
+      JSON.stringify({
+        packageDirectories: [{ path: 'blocked' }, { path: 'working' }],
+        sourceApiVersion: '67.0',
+      })
+    );
+
+    const blockedMainPath = join(projectPath, 'blocked', 'main');
+    const workingMainPath = join(projectPath, 'working', 'main');
+    const workingUiBundlesPath = join(workingMainPath, 'custom', 'uiBundles');
+
+    mkdirSync(blockedMainPath, { recursive: true });
+    mkdirSync(workingUiBundlesPath, { recursive: true });
+
+    expect(lstatSync(blockedMainPath).isDirectory()).toBe(true);
+
+    const accessError = Object.assign(new Error('EACCES: permission denied'), {
+      code: 'EACCES',
+    });
+    vi.mocked(readdirSync).mockImplementationOnce(() => {
+      throw accessError;
+    });
+
+    let result: ReturnType<typeof discoverProject> | undefined;
+
+    expect(() => {
+      result = discoverProject(projectPath);
+    }).not.toThrow();
+
+    expect(result?.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'MF-PROJECT-010',
+          category: 'project',
+          status: 'FAIL',
+          problem: 'EACCES: permission denied',
+          file: blockedMainPath,
+        }),
+      ])
+    );
+    expect(result?.uiBundlesPaths).toContain(workingUiBundlesPath);
+  });
+
+  it('distinguishes a package main lstat failure from an absent path and continues', () => {
+    writeFileSync(
+      join(projectPath, 'sfdx-project.json'),
+      JSON.stringify({
+        packageDirectories: [{ path: 'blocked' }, { path: 'working' }],
+        sourceApiVersion: '67.0',
+      })
+    );
+
+    const blockedMainPath = join(projectPath, 'blocked', 'main');
+    const workingUiBundlesPath = join(
+      projectPath,
+      'working',
+      'main',
+      'custom',
+      'uiBundles'
+    );
+
+    mkdirSync(blockedMainPath, { recursive: true });
+    mkdirSync(workingUiBundlesPath, { recursive: true });
+
+    const accessError = Object.assign(new Error('EACCES: permission denied'), {
+      code: 'EACCES',
+    });
+    vi.mocked(lstatSync).mockImplementationOnce(() => {
+      throw accessError;
+    });
+
+    const result = discoverProject(projectPath);
+
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'MF-PROJECT-010',
+          status: 'FAIL',
+          problem: 'EACCES: permission denied',
+          file: blockedMainPath,
+        }),
+      ])
+    );
+    expect(result.uiBundlesPaths).toContain(workingUiBundlesPath);
+  });
+
+  it('reports a custom uiBundles path that exists but is not a directory', () => {
+    writeFileSync(
+      join(projectPath, 'sfdx-project.json'),
+      JSON.stringify({
+        packageDirectories: [{ path: 'force-app' }],
+        sourceApiVersion: '67.0',
+      })
+    );
+
+    const mainPath = join(projectPath, 'force-app', 'main');
+    const invalidUiBundlesPath = join(mainPath, 'custom', 'uiBundles');
+
+    mkdirSync(join(mainPath, 'default'), { recursive: true });
+    mkdirSync(join(mainPath, 'custom'), { recursive: true });
+    writeFileSync(invalidUiBundlesPath, 'not a directory');
+
+    const result = discoverProject(projectPath);
+
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'MF-PROJECT-013',
+          status: 'FAIL',
+          file: invalidUiBundlesPath,
+        }),
+      ])
+    );
   });
 });

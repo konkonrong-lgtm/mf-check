@@ -4,6 +4,7 @@ import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { hasReadinessBlockers } from '../diagnostics/result.js';
 import { checkBundles } from './bundle.js';
 
 function createValidBundle(bundlePath: string, bundleName = 'MfLab'): void {
@@ -412,6 +413,34 @@ describe('checkBundles', () => {
         }),
       ])
     );
+    expect(result.diagnostics.some((diagnostic) => diagnostic.id === 'MF-META-018')).toBe(
+      false
+    );
+  });
+
+  it('returns a blocking UNKNOWN when ui-bundle.json cannot be read', () => {
+    const bundlePath = join(metadataRoot, 'uiBundles', 'MfLab');
+    const configPath = join(bundlePath, 'ui-bundle.json');
+
+    createValidBundle(bundlePath);
+    rmSync(configPath);
+    mkdirSync(configPath);
+
+    const result = checkBundles([join(metadataRoot, 'uiBundles')]);
+
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'MF-META-018',
+          status: 'UNKNOWN',
+          blocksReadiness: true,
+          file: configPath,
+        }),
+      ])
+    );
+    expect(result.diagnostics.some((diagnostic) => diagnostic.id === 'MF-META-002')).toBe(
+      false
+    );
   });
 
   it('finds UI Bundles across multiple metadata roots', () => {
@@ -462,5 +491,50 @@ describe('checkBundles', () => {
         }),
       ])
     );
+  });
+
+  it('does not crash when uiBundles path is not a directory', () => {
+    const invalidUiBundlesPath = join(projectPath, 'uiBundles');
+
+    writeFileSync(invalidUiBundlesPath, 'not a directory');
+
+    const result = checkBundles([invalidUiBundlesPath]);
+
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'MF-PROJECT-012',
+          status: 'FAIL',
+          file: invalidUiBundlesPath,
+          problem: expect.stringContaining('ENOTDIR'),
+        }),
+      ])
+    );
+  });
+
+  it('blocks readiness for an unreadable uiBundles root while continuing another root', () => {
+    const invalidUiBundlesPath = join(projectPath, 'invalid-uiBundles');
+    const validUiBundlesPath = join(metadataRoot, 'uiBundles');
+
+    writeFileSync(invalidUiBundlesPath, 'not a directory');
+    createValidBundle(join(validUiBundlesPath, 'MfLab'));
+
+    const result = checkBundles([invalidUiBundlesPath, validUiBundlesPath]);
+
+    expect(result.bundles).toEqual(['MfLab']);
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'MF-PROJECT-012',
+          status: 'FAIL',
+          file: invalidUiBundlesPath,
+        }),
+        expect.objectContaining({
+          id: 'MF-META-015',
+          status: 'PASS',
+        }),
+      ])
+    );
+    expect(hasReadinessBlockers(result.diagnostics)).toBe(true);
   });
 });

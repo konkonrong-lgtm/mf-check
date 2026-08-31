@@ -24,9 +24,29 @@ export function checkPermissionSets(metadataRoots: string[]): PermissionSetCheck
     .filter((permissionSetsPath) => existsSync(permissionSetsPath));
 
   for (const permissionSetsPath of permissionSetsPaths) {
-    const permissionSetFiles = readdirSync(permissionSetsPath).filter((file) =>
-      file.endsWith('.permissionset-meta.xml')
-    );
+    let permissionSetFiles: string[];
+
+    try {
+      permissionSetFiles = readdirSync(permissionSetsPath).filter((file) =>
+        file.endsWith('.permissionset-meta.xml')
+      );
+    } catch (error) {
+      diagnostics.push({
+        id: 'MF-ACCESS-006',
+        category: 'access',
+        status: 'FAIL',
+        summary: 'permissionsets directory could not be inspected',
+        problem: error instanceof Error ? error.message : String(error),
+        whyItMatters:
+          'mf-check cannot reliably determine application visibility from PermissionSets when this directory cannot be enumerated.',
+        remediation: [
+          'Make sure the permissionsets directory exists, is a directory, and is readable by the current user, then run mf-check again.',
+        ],
+        file: permissionSetsPath,
+      });
+
+      continue;
+    }
 
     for (const file of permissionSetFiles) {
       const filePath = join(permissionSetsPath, file);
@@ -42,8 +62,13 @@ export function checkPermissionSets(metadataRoots: string[]): PermissionSetCheck
           id: 'MF-ACCESS-002',
           category: 'access',
           status: 'FAIL',
-          summary: `${file}: could not parse PermissionSet metadata`,
+          summary: `${file}: could not inspect PermissionSet metadata`,
           problem: error instanceof Error ? error.message : String(error),
+          whyItMatters:
+            'mf-check cannot reliably determine application visibility granted by this PermissionSet when its metadata cannot be inspected.',
+          remediation: [
+            'Make sure the PermissionSet metadata file is readable and contains valid XML, then run mf-check again.',
+          ],
           file: filePath,
         });
       }

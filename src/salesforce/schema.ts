@@ -163,7 +163,13 @@ export async function getSalesforceSchema(
     data: fetched.data,
   };
 
-  writeSchemaCache(cachePath, cache);
+  let cacheWritten = true;
+
+  try {
+    writeSchemaCache(cachePath, cache);
+  } catch {
+    cacheWritten = false;
+  }
 
   return {
     data: fetched.data,
@@ -171,7 +177,7 @@ export async function getSalesforceSchema(
       targetOrg,
       apiVersion,
       cacheStatus,
-      cacheWritten: true,
+      cacheWritten,
       cacheTtlMinutes: CACHE_TTL_MINUTES,
       ...(orgInfoMs !== undefined
         ? {

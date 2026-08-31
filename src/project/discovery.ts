@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, readFileSync, type Dirent } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 import type { DiagnosticResult } from '../diagnostics/types.js';
@@ -22,12 +22,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-function isDirectory(path: string): boolean {
-  try {
-    return lstatSync(path).isDirectory();
-  } catch {
-    return false;
-  }
+function isMissingPathError(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT';
 }
 
 export function discoverProject(projectPath: string): ProjectDiscoveryResult {
@@ -44,6 +40,11 @@ export function discoverProject(projectPath: string): ProjectDiscoveryResult {
       status: 'FAIL',
       summary: 'sfdx-project.json not found',
       problem: 'The project configuration file sfdx-project.json could not be found.',
+      whyItMatters:
+        'mf-check needs sfdx-project.json to discover package directories, metadata roots, UI Bundles, and the project API version.',
+      remediation: [
+        'Run mf-check from a Salesforce project that contains sfdx-project.json, or provide the correct project path.',
+      ],
       file: configPath,
     });
 
@@ -66,8 +67,13 @@ export function discoverProject(projectPath: string): ProjectDiscoveryResult {
       id: 'MF-PROJECT-007',
       category: 'project',
       status: 'FAIL',
-      summary: 'sfdx-project.json is invalid',
+      summary: 'sfdx-project.json could not be inspected',
       problem: error instanceof Error ? error.message : String(error),
+      whyItMatters:
+        'mf-check cannot reliably discover the Salesforce project structure until sfdx-project.json can be read and parsed.',
+      remediation: [
+        'Make sure sfdx-project.json is readable and contains valid JSON, then run mf-check again.',
+      ],
       file: configPath,
     });
 
@@ -89,6 +95,11 @@ export function discoverProject(projectPath: string): ProjectDiscoveryResult {
       status: 'FAIL',
       summary: 'packageDirectories not found',
       problem: 'The sfdx-project.json file does not define any packageDirectories.',
+      whyItMatters:
+        'mf-check uses packageDirectories to locate Salesforce metadata and Multi-Framework UI Bundles in the project.',
+      remediation: [
+        'Define at least one packageDirectories entry in sfdx-project.json, then run mf-check again.',
+      ],
       file: configPath,
     });
 
@@ -114,6 +125,11 @@ export function discoverProject(projectPath: string): ProjectDiscoveryResult {
         status: 'FAIL',
         summary: 'Invalid packageDirectories entry',
         problem: 'Every packageDirectories entry must define a non-empty path.',
+        whyItMatters:
+          'mf-check cannot discover metadata for a packageDirectories entry without a valid package path.',
+        remediation: [
+          'Add a non-empty path to every packageDirectories entry in sfdx-project.json, then run mf-check again.',
+        ],
         file: configPath,
       });
 
@@ -127,13 +143,75 @@ export function discoverProject(projectPath: string): ProjectDiscoveryResult {
     metadataRoots.add(defaultMetadataRoot);
     uiBundlesPaths.add(join(defaultMetadataRoot, 'uiBundles'));
 
-    if (!isDirectory(mainPath)) {
+    let mainIsDirectory: boolean;
+
+    try {
+      mainIsDirectory = lstatSync(mainPath).isDirectory();
+    } catch (error) {
+      if (isMissingPathError(error)) {
+        continue;
+      }
+
+      diagnostics.push({
+        id: 'MF-PROJECT-010',
+        category: 'project',
+        status: 'FAIL',
+        summary: `${packageDirectory.path}: package main directory could not be inspected`,
+        problem: error instanceof Error ? error.message : String(error),
+        whyItMatters:
+          'mf-check cannot reliably discover source directories and UI Bundle locations under this package when its main directory cannot be inspected.',
+        remediation: [
+          'Make sure the package main directory exists and is readable by the current user, then run mf-check again.',
+        ],
+        file: mainPath,
+      });
+
       continue;
     }
 
-    const sourceDirectories = readdirSync(mainPath, {
-      withFileTypes: true,
-    })
+    if (!mainIsDirectory) {
+      diagnostics.push({
+        id: 'MF-PROJECT-010',
+        category: 'project',
+        status: 'FAIL',
+        summary: `${packageDirectory.path}: package main path is not a directory`,
+        problem: `The package main path "${mainPath}" exists but is not a directory.`,
+        whyItMatters:
+          'mf-check cannot reliably discover source directories and UI Bundle locations under this package without a package main directory.',
+        remediation: [
+          'Make sure the package main path is a directory, then run mf-check again.',
+        ],
+        file: mainPath,
+      });
+
+      continue;
+    }
+
+    let mainEntries: Dirent[];
+
+    try {
+      mainEntries = readdirSync(mainPath, {
+        withFileTypes: true,
+      });
+    } catch (error) {
+      diagnostics.push({
+        id: 'MF-PROJECT-010',
+        category: 'project',
+        status: 'FAIL',
+        summary: `${packageDirectory.path}: package main directory could not be inspected`,
+        problem: error instanceof Error ? error.message : String(error),
+        whyItMatters:
+          'mf-check cannot reliably discover source directories and UI Bundle locations under this package when its main directory cannot be enumerated.',
+        remediation: [
+          'Make sure the package main directory exists and is readable by the current user, then run mf-check again.',
+        ],
+        file: mainPath,
+      });
+
+      continue;
+    }
+
+    const sourceDirectories = mainEntries
       .filter(
         (entry) =>
           entry.isDirectory() && !ignoredMainDirectories.has(entry.name.toLowerCase())
@@ -143,8 +221,46 @@ export function discoverProject(projectPath: string): ProjectDiscoveryResult {
     for (const sourceDirectory of sourceDirectories) {
       const uiBundlesPath = join(mainPath, sourceDirectory.name, 'uiBundles');
 
-      if (isDirectory(uiBundlesPath)) {
+      try {
+        const uiBundlesStats = lstatSync(uiBundlesPath);
+
+        if (!uiBundlesStats.isDirectory()) {
+          diagnostics.push({
+            id: 'MF-PROJECT-013',
+            category: 'project',
+            status: 'FAIL',
+            summary: `${sourceDirectory.name}: uiBundles path is not a directory`,
+            problem: `The uiBundles path "${uiBundlesPath}" exists but is not a directory.`,
+            whyItMatters:
+              'mf-check cannot reliably discover or validate UI Bundles under this source directory without a readable uiBundles directory.',
+            remediation: [
+              'Make sure the uiBundles path is a directory, then run mf-check again.',
+            ],
+            file: uiBundlesPath,
+          });
+
+          continue;
+        }
+
         uiBundlesPaths.add(uiBundlesPath);
+      } catch (error) {
+        if (isMissingPathError(error)) {
+          continue;
+        }
+
+        diagnostics.push({
+          id: 'MF-PROJECT-013',
+          category: 'project',
+          status: 'FAIL',
+          summary: `${sourceDirectory.name}: uiBundles path could not be inspected`,
+          problem: error instanceof Error ? error.message : String(error),
+          whyItMatters:
+            'mf-check cannot reliably discover or validate UI Bundles under this source directory when the uiBundles path cannot be inspected.',
+          remediation: [
+            'Make sure the uiBundles path is readable by the current user, then run mf-check again.',
+          ],
+          file: uiBundlesPath,
+        });
       }
     }
   }

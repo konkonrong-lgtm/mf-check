@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -6,12 +6,22 @@ import { buildSchema, introspectionFromSchema } from 'graphql';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+
+  return {
+    ...actual,
+    readFileSync: vi.fn(actual.readFileSync),
+  };
+});
+
 vi.mock('../salesforce/schema.js', () => ({
   getSalesforceSchema: vi.fn(),
 }));
 
 import { getSalesforceSchema } from '../salesforce/schema.js';
 
+import { hasReadinessBlockers } from '../diagnostics/result.js';
 import { checkSchema } from './schema.js';
 
 const mockedGetSalesforceSchema = vi.mocked(getSalesforceSchema);
@@ -21,6 +31,7 @@ describe('checkSchema', () => {
   let metadataRoot: string;
   let bundlePath: string;
   let graphqlPath: string;
+  let introspectionData: ReturnType<typeof introspectionFromSchema>;
 
   beforeEach(() => {
     projectPath = mkdtempSync(join(tmpdir(), 'mf-check-'));
@@ -54,8 +65,10 @@ describe('checkSchema', () => {
       }
     `);
 
+    introspectionData = introspectionFromSchema(schema);
+
     mockedGetSalesforceSchema.mockResolvedValue({
-      data: introspectionFromSchema(schema),
+      data: introspectionData,
       runtime: {
         targetOrg: 'vscodeOrg',
         apiVersion: '67.0',
@@ -114,6 +127,61 @@ describe('checkSchema', () => {
       false,
       false
     );
+  });
+
+  it('returns a blocking UNKNOWN when the live schema cannot be retrieved', async () => {
+    mockedGetSalesforceSchema.mockRejectedValueOnce(new Error('authentication failed'));
+
+    const result = await checkSchema(
+      projectPath,
+      [join(metadataRoot, 'uiBundles')],
+      '67.0',
+      'vscodeOrg'
+    );
+
+    expect(result.diagnostics).toEqual([
+      expect.objectContaining({
+        id: 'MF-GRAPHQL-006',
+        status: 'UNKNOWN',
+        blocksReadiness: true,
+        problem: 'authentication failed',
+      }),
+    ]);
+    expect(hasReadinessBlockers(result.diagnostics)).toBe(true);
+  });
+
+  it('continues local validation when the fetched schema was not cached', async () => {
+    const operationPath = join(graphqlPath, 'getAccounts.graphql');
+
+    mockedGetSalesforceSchema.mockResolvedValueOnce({
+      data: introspectionData,
+      runtime: {
+        targetOrg: 'vscodeOrg',
+        apiVersion: '67.0',
+        cacheStatus: 'MISS',
+        cacheWritten: false,
+        cacheTtlMinutes: 5,
+      },
+    });
+    writeFileSync(
+      operationPath,
+      'query GetAccounts { Account { edges { node { Id } } } }'
+    );
+
+    const result = await checkSchema(
+      projectPath,
+      [join(metadataRoot, 'uiBundles')],
+      '67.0',
+      'vscodeOrg'
+    );
+
+    expect(result.diagnostics).toEqual([
+      expect.objectContaining({
+        id: 'MF-GRAPHQL-003',
+        status: 'PASS',
+        file: operationPath,
+      }),
+    ]);
   });
 
   it('validates an operation and fragment from separate files together', async () => {
@@ -207,6 +275,61 @@ describe('checkSchema', () => {
         }),
       ])
     );
+  });
+
+  it('fails when a GraphQL file contains invalid syntax', async () => {
+    const operationPath = join(graphqlPath, 'broken.graphql');
+
+    writeFileSync(operationPath, 'query Broken { Account {');
+
+    const result = await checkSchema(
+      projectPath,
+      [join(metadataRoot, 'uiBundles')],
+      '67.0',
+      'vscodeOrg'
+    );
+
+    expect(result.diagnostics).toEqual([
+      expect.objectContaining({
+        id: 'MF-GRAPHQL-005',
+        status: 'FAIL',
+        file: operationPath,
+        line: 1,
+      }),
+    ]);
+  });
+
+  it('returns a blocking UNKNOWN when a GraphQL file cannot be read', async () => {
+    const operationPath = join(graphqlPath, 'getAccounts.graphql');
+    const accessError = Object.assign(new Error('EACCES: permission denied'), {
+      code: 'EACCES',
+    });
+
+    writeFileSync(
+      operationPath,
+      'query GetAccounts { Account { edges { node { Id } } } }'
+    );
+    vi.mocked(readFileSync).mockImplementationOnce(() => {
+      throw accessError;
+    });
+
+    const result = await checkSchema(
+      projectPath,
+      [join(metadataRoot, 'uiBundles')],
+      '67.0',
+      'vscodeOrg'
+    );
+
+    expect(result.diagnostics).toEqual([
+      expect.objectContaining({
+        id: 'MF-GRAPHQL-005',
+        status: 'UNKNOWN',
+        blocksReadiness: true,
+        problem: 'EACCES: permission denied',
+        file: operationPath,
+      }),
+    ]);
+    expect(hasReadinessBlockers(result.diagnostics)).toBe(true);
   });
 
   it('excludes SDL-only files from live operation validation', async () => {

@@ -56,6 +56,8 @@ describe('checkAppAccess', () => {
           id: 'MF-ACCESS-003',
           status: 'UNKNOWN',
           blocksReadiness: true,
+          problem:
+            'mf-check did not confirm application visibility for "MfLabReact" in the local PermissionSet or Profile metadata that it could inspect.',
         }),
       ])
     );
