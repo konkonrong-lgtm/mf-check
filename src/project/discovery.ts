@@ -7,6 +7,7 @@ export type ProjectDiscoveryResult = {
   metadataRoots: string[];
   uiBundlesPaths: string[];
   sourceApiVersion?: string;
+  namespace?: string;
   diagnostics: DiagnosticResult[];
 };
 
@@ -112,6 +113,7 @@ export function discoverProject(projectPath: string): ProjectDiscoveryResult {
 
   const sourceApiVersion =
     typeof config.sourceApiVersion === 'string' ? config.sourceApiVersion : undefined;
+  const namespace = typeof config.namespace === 'string' ? config.namespace : undefined;
 
   for (const packageDirectory of config.packageDirectories) {
     if (
@@ -270,5 +272,6 @@ export function discoverProject(projectPath: string): ProjectDiscoveryResult {
     uiBundlesPaths: [...uiBundlesPaths],
     diagnostics,
     ...(sourceApiVersion ? { sourceApiVersion } : {}),
+    ...(namespace !== undefined ? { namespace } : {}),
   };
 }

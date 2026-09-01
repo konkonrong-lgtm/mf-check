@@ -7,7 +7,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { hasReadinessBlockers } from '../diagnostics/result.js';
 import { checkBundles } from './bundle.js';
 
-function createValidBundle(bundlePath: string, bundleName = 'MfLab'): void {
+function createValidBundle(
+  bundlePath: string,
+  bundleName = 'MfLab',
+  target = 'CustomApplication'
+): void {
   mkdirSync(join(bundlePath, 'dist'), {
     recursive: true,
   });
@@ -17,7 +21,7 @@ function createValidBundle(bundlePath: string, bundleName = 'MfLab'): void {
     `<?xml version="1.0" encoding="UTF-8"?>
     <UIBundle xmlns="http://soap.sforce.com/2006/04/metadata">
       <masterLabel>${bundleName}</masterLabel>
-      <target>CustomApplication</target>
+      <target>${target}</target>
     </UIBundle>`
   );
 
@@ -70,7 +74,12 @@ describe('checkBundles', () => {
 
     const result = checkBundles([join(metadataRoot, 'uiBundles')]);
 
-    expect(result.bundles).toEqual(['MfLab']);
+    expect(result.bundles).toEqual([
+      expect.objectContaining({
+        name: 'MfLab',
+        target: 'CustomApplication',
+      }),
+    ]);
 
     expect(result.diagnostics).toEqual(
       expect.arrayContaining([
@@ -86,6 +95,125 @@ describe('checkBundles', () => {
     );
 
     expect(result.diagnostics.some((diagnostic) => diagnostic.status === 'FAIL')).toBe(
+      false
+    );
+  });
+
+  it('preserves the Experience target from UI Bundle metadata', () => {
+    const bundlePath = join(metadataRoot, 'uiBundles', 'MfLab');
+
+    createValidBundle(bundlePath, 'MfLab', 'Experience');
+
+    const result = checkBundles([join(metadataRoot, 'uiBundles')]);
+
+    expect(result.bundles).toEqual([
+      expect.objectContaining({
+        name: 'MfLab',
+        target: 'Experience',
+      }),
+    ]);
+  });
+
+  it('defaults an omitted UI Bundle target to CustomApplication', () => {
+    const bundlePath = join(metadataRoot, 'uiBundles', 'MfLab');
+
+    createValidBundle(bundlePath);
+
+    writeFileSync(
+      join(bundlePath, 'MfLab.uibundle-meta.xml'),
+      `<?xml version="1.0" encoding="UTF-8"?>
+    <UIBundle xmlns="http://soap.sforce.com/2006/04/metadata">
+      <masterLabel>MfLab</masterLabel>
+    </UIBundle>`
+    );
+
+    const result = checkBundles([join(metadataRoot, 'uiBundles')]);
+
+    expect(result.bundles).toEqual([
+      expect.objectContaining({
+        name: 'MfLab',
+        target: 'CustomApplication',
+      }),
+    ]);
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'MF-META-015',
+          status: 'PASS',
+        }),
+      ])
+    );
+    expect(result.diagnostics.some((diagnostic) => diagnostic.status === 'FAIL')).toBe(
+      false
+    );
+  });
+
+  it('does not infer a target when UI Bundle metadata cannot be parsed', () => {
+    const bundlePath = join(metadataRoot, 'uiBundles', 'MfLab');
+
+    createValidBundle(bundlePath);
+
+    writeFileSync(join(bundlePath, 'MfLab.uibundle-meta.xml'), '<UIBundle><target>');
+
+    const result = checkBundles([join(metadataRoot, 'uiBundles')]);
+
+    expect(result.bundles).toHaveLength(1);
+    expect(result.bundles[0]).toEqual(
+      expect.objectContaining({
+        name: 'MfLab',
+      })
+    );
+    expect(result.bundles[0]).not.toHaveProperty('target');
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'MF-META-013',
+          status: 'FAIL',
+        }),
+      ])
+    );
+    expect(result.diagnostics.some((diagnostic) => diagnostic.id === 'MF-META-015')).toBe(
+      false
+    );
+  });
+
+  it.each([
+    {
+      description: 'an empty UIBundle root',
+      metadata: '<UIBundle/>',
+    },
+    {
+      description: 'an empty target',
+      metadata: '<UIBundle><target/></UIBundle>',
+    },
+    {
+      description: 'multiple targets',
+      metadata:
+        '<UIBundle><target>CustomApplication</target><target>Experience</target></UIBundle>',
+    },
+    {
+      description: 'an unsupported target',
+      metadata: '<UIBundle><target>Typo</target></UIBundle>',
+    },
+  ])('fails without inferring a target for $description', ({ metadata }) => {
+    const bundlePath = join(metadataRoot, 'uiBundles', 'MfLab');
+
+    createValidBundle(bundlePath);
+    writeFileSync(join(bundlePath, 'MfLab.uibundle-meta.xml'), metadata);
+
+    const result = checkBundles([join(metadataRoot, 'uiBundles')]);
+
+    expect(result.bundles).toHaveLength(1);
+    expect(result.bundles[0]).not.toHaveProperty('target');
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'MF-META-014',
+          status: 'FAIL',
+        }),
+      ])
+    );
+    expect(result.diagnostics.some((diagnostic) => diagnostic.id === 'MF-META-015')).toBe(
       false
     );
   });
@@ -459,7 +587,12 @@ describe('checkBundles', () => {
       join(secondMetadataRoot, 'uiBundles'),
     ]);
 
-    expect(result.bundles).toEqual(['MfLab']);
+    expect(result.bundles).toEqual([
+      expect.objectContaining({
+        name: 'MfLab',
+        target: 'CustomApplication',
+      }),
+    ]);
 
     expect(result.diagnostics).not.toEqual(
       expect.arrayContaining([
@@ -521,7 +654,12 @@ describe('checkBundles', () => {
 
     const result = checkBundles([invalidUiBundlesPath, validUiBundlesPath]);
 
-    expect(result.bundles).toEqual(['MfLab']);
+    expect(result.bundles).toEqual([
+      expect.objectContaining({
+        name: 'MfLab',
+        target: 'CustomApplication',
+      }),
+    ]);
     expect(result.diagnostics).toEqual(
       expect.arrayContaining([
         expect.objectContaining({

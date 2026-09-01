@@ -228,7 +228,12 @@ describe('discoverProject', () => {
       []
     );
 
-    expect(bundleResult.bundles).toEqual(['reactRecipes']);
+    expect(bundleResult.bundles).toEqual([
+      expect.objectContaining({
+        name: 'reactRecipes',
+        target: 'CustomApplication',
+      }),
+    ]);
     expect(applicationResult.applicationNames).toEqual(['ReactRecipes']);
     expect(permissionSetResult.visibleApplications).toEqual(['ReactRecipes']);
     expect(accessResult.diagnostics).toEqual([
@@ -313,6 +318,32 @@ describe('discoverProject', () => {
     expect(result.uiBundlesPaths).toEqual([uiBundlesPath]);
 
     expect(result.sourceApiVersion).toBe('67.0');
+  });
+
+  it('preserves the project namespace from sfdx-project.json', () => {
+    writeFileSync(
+      join(projectPath, 'sfdx-project.json'),
+      JSON.stringify({
+        packageDirectories: [
+          {
+            path: 'src',
+            default: true,
+          },
+        ],
+        namespace: 'acme',
+        sourceApiVersion: '67.0',
+      })
+    );
+
+    const metadataRoot = join(projectPath, 'src', 'main', 'default');
+
+    mkdirSync(metadataRoot, {
+      recursive: true,
+    });
+
+    const result = discoverProject(projectPath);
+
+    expect(result.namespace).toBe('acme');
   });
 
   it('reports a diagnostic and continues when a package main directory cannot be enumerated', () => {

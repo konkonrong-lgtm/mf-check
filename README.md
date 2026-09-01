@@ -18,7 +18,8 @@ Currently:
 
 - Salesforce project discovery from `sfdx-project.json` package directories
 - UI Bundle configuration and build output
-- CustomApplication → UI Bundle linkage
+- CustomApplication → UI Bundle linkage for internal apps
+- Experience Cloud → UI Bundle linkage for customer-facing apps
 - whether the CustomApplication is a Lightning app
 - application visibility through Permission Sets or Profiles
 - `.graphql` operations against the target org's GraphQL schema

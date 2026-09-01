@@ -5,8 +5,14 @@ import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import type { DiagnosticResult } from '../diagnostics/types.js';
 import { resolveUiBundleOutputPath } from '../utils/uiBundleOutput.js';
 
+export type BundleInfo = {
+  name: string;
+  path: string;
+  target?: string;
+};
+
 type BundleCheckResult = {
-  bundles: string[];
+  bundles: BundleInfo[];
   diagnostics: DiagnosticResult[];
 };
 
@@ -49,10 +55,7 @@ export function checkBundles(uiBundlesPaths: string[]): BundleCheckResult {
 
   const readableUiBundlesPaths: string[] = [];
 
-  const bundleLocations: {
-    name: string;
-    path: string;
-  }[] = [];
+  const bundleLocations: BundleInfo[] = [];
 
   for (const uiBundlesPath of uiBundlesPaths) {
     if (!existsSync(uiBundlesPath)) {
@@ -143,13 +146,13 @@ export function checkBundles(uiBundlesPaths: string[]): BundleCheckResult {
     };
   }
 
-  const bundles = [...new Set(bundleLocations.map((bundle) => bundle.name))];
+  const bundlesNames = [...new Set(bundleLocations.map((bundle) => bundle.name))];
 
   diagnostics.push({
     id: 'MF-PROJECT-004',
     category: 'project',
     status: 'PASS',
-    summary: `Found UI Bundles: ${bundles.join(', ')}`,
+    summary: `Found UI Bundles: ${bundlesNames.join(', ')}`,
   });
 
   const xmlParser = new XMLParser();
@@ -196,7 +199,10 @@ export function checkBundles(uiBundlesPaths: string[]): BundleCheckResult {
           if (
             typeof parsedMetadata !== 'object' ||
             parsedMetadata === null ||
-            !Object.hasOwn(parsedMetadata, 'UIBundle')
+            !Object.hasOwn(parsedMetadata, 'UIBundle') ||
+            typeof parsedMetadata.UIBundle !== 'object' ||
+            parsedMetadata.UIBundle === null ||
+            Array.isArray(parsedMetadata.UIBundle)
           ) {
             diagnostics.push({
               id: 'MF-META-014',
@@ -212,10 +218,40 @@ export function checkBundles(uiBundlesPaths: string[]): BundleCheckResult {
               file: metadataPath,
             });
           } else {
-            const target = parsedMetadata.UIBundle?.target;
-            const targets = Array.isArray(target) ? target : [target];
+            const hasTarget = Object.hasOwn(parsedMetadata.UIBundle, 'target');
+            const target = parsedMetadata.UIBundle.target;
 
-            if (targets.includes('AppLauncher')) {
+            if (!hasTarget) {
+              bundle.target = 'CustomApplication';
+
+              diagnostics.push({
+                id: 'MF-META-015',
+                category: 'metadata',
+                status: 'PASS',
+                summary: `${bundle.name}: valid UIBundle metadata`,
+                file: metadataPath,
+              });
+            } else if (
+              typeof target !== 'string' ||
+              !['CustomApplication', 'Experience', 'AppLauncher'].includes(target)
+            ) {
+              diagnostics.push({
+                id: 'MF-META-014',
+                category: 'metadata',
+                status: 'FAIL',
+                summary: `${bundle.name}: invalid UIBundle target`,
+                problem:
+                  'The target element must contain exactly one supported value: CustomApplication, Experience, or AppLauncher.',
+                whyItMatters:
+                  'mf-check cannot determine the UI Bundle topology from an empty, repeated, or unsupported target value.',
+                remediation: [
+                  'Set target to CustomApplication or Experience. Use AppLauncher only while identifying metadata that still requires GA migration.',
+                ],
+                file: metadataPath,
+              });
+            } else if (target === 'AppLauncher') {
+              bundle.target = target;
+
               diagnostics.push({
                 id: 'MF-META-017',
                 category: 'metadata',
@@ -234,6 +270,8 @@ export function checkBundles(uiBundlesPaths: string[]): BundleCheckResult {
                   'https://developer.salesforce.com/blogs/2026/07/build-with-react-on-salesforce-multi-framework-is-now-ga',
               });
             } else {
+              bundle.target = target;
+
               diagnostics.push({
                 id: 'MF-META-015',
                 category: 'metadata',
@@ -444,7 +482,7 @@ export function checkBundles(uiBundlesPaths: string[]): BundleCheckResult {
   }
 
   return {
-    bundles,
+    bundles: bundleLocations,
     diagnostics,
   };
 }

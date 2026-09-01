@@ -7,6 +7,7 @@ import { checkProfiles } from './checks/profile.js';
 import { checkAppAccess } from './checks/appAccess.js';
 import { discoverProject } from './project/discovery.js';
 import { checkSchema, type SchemaCheckRuntimeInfo } from './checks/schema.js';
+import { checkExperienceLinkage } from './checks/experience.js';
 import { checkGaMigration } from './checks/gaMigration.js';
 import type { DiagnosticResult } from './diagnostics/types.js';
 import { hasFailures, hasReadinessBlockers } from './diagnostics/result.js';
@@ -57,6 +58,12 @@ const gaMigrationResult = checkGaMigration(projectPath, uiBundlesPaths);
 
 const applicationResult = checkApplications(metadataRoots, bundleResult.bundles);
 
+const experienceResult = checkExperienceLinkage(
+  metadataRoots,
+  bundleResult.bundles,
+  discoveryResult.namespace ?? ''
+);
+
 const permissionSetResult = checkPermissionSets(metadataRoots);
 
 const profileResult = checkProfiles(metadataRoots);
@@ -104,6 +111,7 @@ const diagnostics = [
   ...bundleResult.diagnostics,
   ...gaMigrationResult.diagnostics,
   ...applicationResult.diagnostics,
+  ...experienceResult.diagnostics,
   ...permissionSetResult.diagnostics,
   ...profileResult.diagnostics,
   ...appAccessResult.diagnostics,

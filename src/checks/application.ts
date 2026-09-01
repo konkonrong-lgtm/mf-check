@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
+import type { BundleInfo } from './bundle.js';
 
 import type { DiagnosticResult } from '../diagnostics/types.js';
 
@@ -11,7 +12,7 @@ type ApplicationCheckResult = {
 
 export function checkApplications(
   metadataRoots: string[],
-  bundles: string[]
+  bundles: BundleInfo[]
 ): ApplicationCheckResult {
   const diagnostics: DiagnosticResult[] = [];
 
@@ -22,11 +23,17 @@ export function checkApplications(
     };
   }
 
+  const customApplicationBundleNames = new Set(
+    bundles
+      .filter((bundle) => bundle.target === 'CustomApplication')
+      .map((bundle) => bundle.name)
+  );
+
   const applicationPaths = metadataRoots
     .map((metadataRoot) => join(metadataRoot, 'applications'))
     .filter((applicationsPath) => existsSync(applicationsPath));
 
-  if (applicationPaths.length === 0) {
+  if (applicationPaths.length === 0 && customApplicationBundleNames.size > 0) {
     diagnostics.push({
       id: 'MF-PROJECT-005',
       category: 'project',
@@ -50,6 +57,15 @@ export function checkApplications(
   const parser = new XMLParser();
   const applicationNames = new Set<string>();
   const referencedBundles = new Set<string>();
+
+  const bundlesByName = new Map<string, BundleInfo[]>();
+
+  for (const bundle of bundles) {
+    const matchingBundles = bundlesByName.get(bundle.name) ?? [];
+    matchingBundles.push(bundle);
+    bundlesByName.set(bundle.name, matchingBundles);
+  }
+
   let linkageInspectionComplete = true;
 
   for (const applicationsPath of applicationPaths) {
@@ -163,7 +179,9 @@ export function checkApplications(
           continue;
         }
 
-        if (!bundles.includes(bundleName)) {
+        const matchingBundles = bundlesByName.get(bundleName);
+
+        if (!matchingBundles) {
           diagnostics.push({
             id: 'MF-META-009',
             category: 'metadata',
@@ -177,6 +195,41 @@ export function checkApplications(
             ],
             file: filePath,
           });
+
+          continue;
+        }
+
+        if (!matchingBundles.some((bundle) => bundle.target === 'CustomApplication')) {
+          if (matchingBundles.some((bundle) => bundle.target === undefined)) {
+            diagnostics.push({
+              id: 'MF-META-009',
+              category: 'metadata',
+              status: 'UNKNOWN',
+              blocksReadiness: true,
+              summary: `${appName}: referenced UI Bundle target is unknown`,
+              problem: `The application "${appName}" references UI Bundle "${uiBundle}", but mf-check could not determine that bundle's target.`,
+              whyItMatters:
+                'A CustomApplication reference is valid only for a UI Bundle whose target is CustomApplication.',
+              remediation: [
+                'Fix or restore the referenced UIBundle metadata so its target can be inspected, then run mf-check again.',
+              ],
+              file: filePath,
+            });
+          } else {
+            diagnostics.push({
+              id: 'MF-META-009',
+              category: 'metadata',
+              status: 'FAIL',
+              summary: `${appName}: references a non-CustomApplication UI Bundle`,
+              problem: `The application "${appName}" references UI Bundle "${uiBundle}", but that bundle does not target CustomApplication.`,
+              whyItMatters:
+                'Experience UI Bundles are customer-facing entry points and cannot satisfy CustomApplication linkage.',
+              remediation: [
+                'Reference a UI Bundle whose target is CustomApplication, or remove the incompatible CustomApplication metadata.',
+              ],
+              file: filePath,
+            });
+          }
 
           continue;
         }
@@ -211,14 +264,14 @@ export function checkApplications(
   }
 
   if (linkageInspectionComplete) {
-    for (const bundle of bundles) {
-      if (!referencedBundles.has(bundle)) {
+    for (const bundleName of customApplicationBundleNames) {
+      if (!referencedBundles.has(bundleName)) {
         diagnostics.push({
           id: 'MF-META-011',
           category: 'metadata',
           status: 'FAIL',
-          summary: `${bundle}: no CustomApplication references this UI Bundle`,
-          problem: `The UI Bundle "${bundle}" is not referenced by any CustomApplication.`,
+          summary: `${bundleName}: no CustomApplication references this UI Bundle`,
+          problem: `The UI Bundle "${bundleName}" is not referenced by any CustomApplication.`,
           whyItMatters:
             'Without a CustomApplication reference, mf-check cannot confirm a user-facing application entry point for this UI Bundle.',
           remediation: [
