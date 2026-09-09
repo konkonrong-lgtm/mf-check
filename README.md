@@ -22,7 +22,8 @@ Currently:
 - Experience Cloud → UI Bundle linkage for customer-facing apps
 - whether the CustomApplication is a Lightning app
 - application visibility through Permission Sets or Profiles
-- `.graphql` operations against the target org's GraphQL schema
+- external `.graphql` operations and static inline Salesforce SDK `gql`
+  documents against the target org's GraphQL schema
 - GA migration residue
   - deprecated `@salesforce/sdk-data` dependencies
   - deprecated `UIBundleSettings` scratch configuration
@@ -31,6 +32,15 @@ Currently:
 
 Live schema results are cached for 5 minutes because Salesforce introspection
 can be slow. Use `--refresh` together with `--target-org` to bypass the cache.
+
+Inline GraphQL scanning supports direct named `gql` imports, including import
+aliases, from `@salesforce/platform-sdk` and `@salesforce/platform-sdk/data` in
+UI Bundle JS, JSX, TS, and TSX source. Templates containing `${...}` interpolation
+aren't evaluated or partially validated; they are reported as a non-blocking
+`UNKNOWN`. A source file that can't be read or parsed is a blocking `UNKNOWN`
+because the scan scope couldn't be confirmed. Wrapper functions, re-exports,
+variable aliases, and cross-template or cross-file fragment resolution aren't
+followed for inline documents.
 
 ## Installation
 

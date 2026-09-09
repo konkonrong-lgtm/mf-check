@@ -613,6 +613,325 @@ describe('checkSchema', () => {
     );
   });
 
+  it('validates a static inline Salesforce gql document', async () => {
+    const sourceFile = join(graphqlPath, 'accounts.ts');
+
+    writeFileSync(
+      sourceFile,
+      [
+        "import { gql } from '@salesforce/platform-sdk/data';",
+        'const query = gql`',
+        '  query Accounts {',
+        '    Account { edges { node { Id Name } } }',
+        '  }',
+        '`;',
+      ].join('\n')
+    );
+
+    const result = await checkSchema(
+      projectPath,
+      [join(metadataRoot, 'uiBundles')],
+      '67.0',
+      'vscodeOrg'
+    );
+
+    expect(result.diagnostics).toEqual([
+      expect.objectContaining({
+        id: 'MF-GRAPHQL-003',
+        status: 'PASS',
+        file: sourceFile,
+        line: 2,
+      }),
+    ]);
+    expect(
+      result.diagnostics.some((diagnostic) => diagnostic.id === 'MF-GRAPHQL-002')
+    ).toBe(false);
+  });
+
+  it('maps inline syntax and schema errors to separate templates in the source file', async () => {
+    const sourceFile = join(graphqlPath, 'invalid.ts');
+
+    writeFileSync(
+      sourceFile,
+      [
+        "import { gql } from '@salesforce/platform-sdk/data';",
+        '',
+        'const unknownField = gql`',
+        '  query UnknownField {',
+        '    Missing',
+        '  }',
+        '`;',
+        '',
+        'const broken = gql`',
+        '  query Broken {',
+        '    Account {',
+        '`;',
+      ].join('\n')
+    );
+
+    const result = await checkSchema(
+      projectPath,
+      [join(metadataRoot, 'uiBundles')],
+      '67.0',
+      'vscodeOrg'
+    );
+    const schemaDiagnostic = result.diagnostics.find(
+      (diagnostic) => diagnostic.id === 'MF-GRAPHQL-004'
+    );
+    const syntaxDiagnostic = result.diagnostics.find(
+      (diagnostic) => diagnostic.id === 'MF-GRAPHQL-005'
+    );
+
+    expect(schemaDiagnostic).toEqual(
+      expect.objectContaining({
+        status: 'FAIL',
+        summary: expect.stringContaining(':3: inline GraphQL invalid'),
+        file: sourceFile,
+        line: 5,
+      })
+    );
+    expect(syntaxDiagnostic).toEqual(
+      expect.objectContaining({
+        status: 'FAIL',
+        summary: expect.stringContaining(':9: invalid inline GraphQL syntax'),
+        file: sourceFile,
+        line: 12,
+      })
+    );
+  });
+
+  it('validates inline templates as independent GraphQL documents', async () => {
+    const sourceFile = join(graphqlPath, 'independent.ts');
+
+    writeFileSync(
+      sourceFile,
+      [
+        "import { gql } from '@salesforce/platform-sdk';",
+        'const firstNamed = gql`query Shared { Account { edges { node { Id } } } }`;',
+        'const secondNamed = gql`query Shared { Account { edges { node { Name } } } }`;',
+        'const firstAnonymous = gql`{ Account { edges { node { Id } } } }`;',
+        'const secondAnonymous = gql`{ Account { edges { node { Name } } } }`;',
+      ].join('\n')
+    );
+
+    const result = await checkSchema(
+      projectPath,
+      [join(metadataRoot, 'uiBundles')],
+      '67.0',
+      'vscodeOrg'
+    );
+
+    expect(
+      result.diagnostics.filter((diagnostic) => diagnostic.id === 'MF-GRAPHQL-003')
+    ).toHaveLength(4);
+    expect(result.diagnostics.some((diagnostic) => diagnostic.status === 'FAIL')).toBe(
+      false
+    );
+  });
+
+  it('validates an operation and fragment together inside one inline document', async () => {
+    const sourceFile = join(graphqlPath, 'fragment.ts');
+
+    writeFileSync(
+      sourceFile,
+      [
+        "import { gql as sfGql } from '@salesforce/platform-sdk/data';",
+        'const query = sfGql`',
+        '  query Accounts {',
+        '    Account { edges { node { ...AccountFields } } }',
+        '  }',
+        '  fragment AccountFields on Account { Id Name }',
+        '`;',
+      ].join('\n')
+    );
+
+    const result = await checkSchema(
+      projectPath,
+      [join(metadataRoot, 'uiBundles')],
+      '67.0',
+      'vscodeOrg'
+    );
+
+    expect(result.diagnostics).toEqual([
+      expect.objectContaining({
+        id: 'MF-GRAPHQL-003',
+        status: 'PASS',
+        file: sourceFile,
+      }),
+    ]);
+  });
+
+  it('keeps external GraphQL and inline GraphQL validation side by side', async () => {
+    const externalFile = join(graphqlPath, 'external.graphql');
+    const inlineFile = join(graphqlPath, 'inline.tsx');
+
+    writeFileSync(externalFile, 'query External { Account { edges { node { Id } } } }');
+    writeFileSync(
+      inlineFile,
+      [
+        "import { gql } from '@salesforce/platform-sdk/data';",
+        'const element = <div />;',
+        'const query = gql`query Inline { Account { edges { node { Name } } } }`;',
+      ].join('\n')
+    );
+
+    const result = await checkSchema(
+      projectPath,
+      [join(metadataRoot, 'uiBundles')],
+      '67.0',
+      'vscodeOrg'
+    );
+
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'MF-GRAPHQL-003',
+          file: externalFile,
+        }),
+        expect.objectContaining({
+          id: 'MF-GRAPHQL-003',
+          file: inlineFile,
+        }),
+      ])
+    );
+    expect(result.diagnostics).toHaveLength(2);
+  });
+
+  it('reports dynamic inline GraphQL as a non-blocking UNKNOWN without a syntax failure', async () => {
+    const sourceFile = join(graphqlPath, 'dynamic.js');
+
+    writeFileSync(
+      sourceFile,
+      [
+        "import { gql } from '@salesforce/platform-sdk/data';",
+        "const fields = 'Id';",
+        'const query = gql`query Accounts { Account { edges { node { ${fields} } } } }`;',
+      ].join('\n')
+    );
+
+    const result = await checkSchema(
+      projectPath,
+      [join(metadataRoot, 'uiBundles')],
+      '67.0',
+      'vscodeOrg'
+    );
+
+    expect(result.diagnostics).toEqual([
+      expect.objectContaining({
+        id: 'MF-GRAPHQL-010',
+        status: 'UNKNOWN',
+        blocksReadiness: false,
+        file: sourceFile,
+        line: 3,
+      }),
+    ]);
+    expect(hasReadinessBlockers(result.diagnostics)).toBe(false);
+    expect(result.diagnostics.some((diagnostic) => diagnostic.status === 'FAIL')).toBe(
+      false
+    );
+  });
+
+  it('reports a blocking UNKNOWN when a candidate inline source file cannot be parsed', async () => {
+    const sourceFile = join(graphqlPath, 'unparseable.jsx');
+
+    writeFileSync(
+      sourceFile,
+      "import { gql } from '@salesforce/platform-sdk/data';\nconst query = gql`query Accounts { Account { Id } }`;\nconst broken = <div>"
+    );
+
+    const result = await checkSchema(
+      projectPath,
+      [join(metadataRoot, 'uiBundles')],
+      '67.0',
+      'vscodeOrg'
+    );
+
+    expect(result.diagnostics).toEqual([
+      expect.objectContaining({
+        id: 'MF-GRAPHQL-009',
+        status: 'UNKNOWN',
+        blocksReadiness: true,
+        file: sourceFile,
+      }),
+    ]);
+    expect(hasReadinessBlockers(result.diagnostics)).toBe(true);
+    expect(
+      result.diagnostics.some((diagnostic) => diagnostic.id === 'MF-GRAPHQL-002')
+    ).toBe(false);
+  });
+
+  it('omits a precise error line when template escaping prevents reliable mapping', async () => {
+    const sourceFile = join(graphqlPath, 'escaped.ts');
+
+    writeFileSync(
+      sourceFile,
+      "import { gql } from '@salesforce/platform-sdk/data';\nconst query = gql`query Escaped { M\\u0069ssing }`;"
+    );
+
+    const result = await checkSchema(
+      projectPath,
+      [join(metadataRoot, 'uiBundles')],
+      '67.0',
+      'vscodeOrg'
+    );
+    const diagnostic = result.diagnostics.find(
+      (candidate) => candidate.id === 'MF-GRAPHQL-004'
+    );
+
+    expect(diagnostic).toEqual(
+      expect.objectContaining({
+        status: 'FAIL',
+        file: sourceFile,
+      })
+    );
+    expect(diagnostic?.line).toBeUndefined();
+  });
+
+  it('applies existing source directory exclusions and the configured outputDir', async () => {
+    const outputPath = join(bundlePath, 'src', 'compiled');
+    const invalidSource =
+      "import { gql } from '@salesforce/platform-sdk/data';\nconst query = gql`query Ignored { Missing }`;";
+    const ignoredDirectories = [
+      'node_modules',
+      'dist',
+      'build',
+      'coverage',
+      'fixture',
+      'fixtures',
+      '__fixtures__',
+      'test-fixtures',
+      'generated',
+      '__generated__',
+    ];
+
+    mkdirSync(outputPath, { recursive: true });
+    writeFileSync(
+      join(bundlePath, 'ui-bundle.json'),
+      JSON.stringify({ outputDir: 'src/compiled' })
+    );
+    writeFileSync(join(outputPath, 'generated.ts'), invalidSource);
+
+    for (const ignoredDirectory of ignoredDirectories) {
+      const ignoredPath = join(bundlePath, 'src', ignoredDirectory);
+      mkdirSync(ignoredPath, { recursive: true });
+      writeFileSync(join(ignoredPath, 'ignored.ts'), invalidSource);
+    }
+
+    const result = await checkSchema(
+      projectPath,
+      [join(metadataRoot, 'uiBundles')],
+      '67.0',
+      'vscodeOrg'
+    );
+
+    expect(result.diagnostics).toEqual([
+      expect.objectContaining({
+        id: 'MF-GRAPHQL-002',
+        status: 'PASS',
+      }),
+    ]);
+  });
+
   it('forwards refresh option to Salesforce schema loader', async () => {
     writeFileSync(
       join(graphqlPath, 'getAccounts.graphql'),

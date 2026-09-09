@@ -1,4 +1,4 @@
-import { findGraphqlFiles } from '../utils/files.js';
+import { findGraphqlFiles, findSourceFiles } from '../utils/files.js';
 import { existsSync, readdirSync, readFileSync, type Dirent } from 'node:fs';
 import { join, relative } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -19,6 +19,10 @@ import {
   type DocumentNode,
 } from 'graphql';
 import type { DiagnosticResult } from '../diagnostics/types.js';
+import {
+  extractInlineGraphqlDocuments,
+  type InlineGraphqlDocument,
+} from '../utils/inlineGraphql.js';
 import { resolveUiBundleOutputPath } from '../utils/uiBundleOutput.js';
 
 export type SchemaCheckRuntimeInfo = SalesforceSchemaRuntimeInfo & {
@@ -51,6 +55,17 @@ function getUiBundleOutputPath(bundlePath: string): string | undefined {
     // Bundle validation reports invalid descriptors and outputDir paths.
     return undefined;
   }
+}
+
+function getInlineSourceLine(
+  document: InlineGraphqlDocument,
+  graphqlLine: number | undefined
+): number | undefined {
+  if (!document.hasReliableLineMapping || graphqlLine === undefined) {
+    return undefined;
+  }
+
+  return document.contentStartLine + graphqlLine - 1;
 }
 
 export async function checkSchema(
@@ -143,7 +158,7 @@ export async function checkSchema(
     ...(schemaProcessingMs !== undefined ? { schemaProcessingMs } : {}),
   };
 
-  const graphqlBundles: { files: string[] }[] = [];
+  const graphqlBundles: { files: string[]; sourceFiles: string[] }[] = [];
   let inspectionFailureCount = 0;
 
   for (const uiBundlesPath of uiBundlesPaths) {
@@ -181,12 +196,12 @@ export async function checkSchema(
       }
 
       const bundlePath = join(uiBundlesPath, entry.name);
+      const outputPath = getUiBundleOutputPath(bundlePath);
+      const excludedPaths = outputPath ? [outputPath] : [];
+      let files: string[];
 
       try {
-        const outputPath = getUiBundleOutputPath(bundlePath);
-        graphqlBundles.push({
-          files: findGraphqlFiles(bundlePath, outputPath ? [outputPath] : []),
-        });
+        files = findGraphqlFiles(bundlePath, excludedPaths);
       } catch (error) {
         inspectionFailureCount += 1;
         diagnostics.push({
@@ -203,11 +218,38 @@ export async function checkSchema(
           ],
           file: bundlePath,
         });
+
+        continue;
       }
+
+      let sourceFiles: string[] = [];
+
+      try {
+        sourceFiles = findSourceFiles(join(bundlePath, 'src'), excludedPaths);
+      } catch (error) {
+        inspectionFailureCount += 1;
+        diagnostics.push({
+          id: 'MF-GRAPHQL-009',
+          category: 'data',
+          status: 'UNKNOWN',
+          blocksReadiness: true,
+          summary: `${entry.name}: inline GraphQL scan incomplete`,
+          problem: error instanceof Error ? error.message : String(error),
+          whyItMatters:
+            'mf-check cannot confirm target-org compatibility for inline GraphQL in a UI Bundle whose source directory cannot be fully enumerated.',
+          remediation: [
+            'Make sure the UI Bundle source directory is readable, then run mf-check again.',
+          ],
+          file: join(bundlePath, 'src'),
+        });
+      }
+
+      graphqlBundles.push({ files, sourceFiles });
     }
   }
 
   let executableDefinitionCount = 0;
+  let inlineTemplateCount = 0;
 
   for (const bundle of graphqlBundles) {
     const executableDefinitions: DefinitionNode[] = [];
@@ -368,7 +410,179 @@ export async function checkSchema(
     }
   }
 
-  if (executableDefinitionCount === 0 && inspectionFailureCount === 0) {
+  for (const bundle of graphqlBundles) {
+    for (const filePath of bundle.sourceFiles) {
+      let extractionResult: ReturnType<typeof extractInlineGraphqlDocuments>;
+
+      try {
+        extractionResult = extractInlineGraphqlDocuments(filePath);
+      } catch (error) {
+        inspectionFailureCount += 1;
+        diagnostics.push({
+          id: 'MF-GRAPHQL-009',
+          category: 'data',
+          status: 'UNKNOWN',
+          blocksReadiness: true,
+          summary: `${relative(projectPath, filePath)}: inline GraphQL scan incomplete`,
+          problem: error instanceof Error ? error.message : String(error),
+          whyItMatters:
+            'mf-check could not inspect this source file, so it cannot confirm whether all inline GraphQL documents are compatible with the target org.',
+          remediation: [
+            'Make sure the source file is readable and uses supported JavaScript or TypeScript syntax, then run mf-check again.',
+          ],
+          file: filePath,
+        });
+        continue;
+      }
+
+      for (const unvalidatedTemplate of extractionResult.unvalidatedTemplates) {
+        inlineTemplateCount += 1;
+        const displayPath = `${relative(projectPath, filePath)}:${unvalidatedTemplate.line}`;
+
+        if (unvalidatedTemplate.reason === 'dynamic') {
+          diagnostics.push({
+            id: 'MF-GRAPHQL-010',
+            category: 'data',
+            status: 'UNKNOWN',
+            blocksReadiness: false,
+            summary: `${displayPath}: dynamic inline GraphQL not statically validated`,
+            problem:
+              'This Salesforce SDK gql template contains interpolation, so mf-check did not evaluate or partially validate it.',
+            whyItMatters:
+              'The template may be valid at runtime, but mf-check cannot confirm its target-org compatibility without evaluating source code.',
+            remediation: [
+              'Use a static gql template when you want mf-check to validate the complete GraphQL document.',
+            ],
+            file: filePath,
+            line: unvalidatedTemplate.line,
+          });
+          continue;
+        }
+
+        inspectionFailureCount += 1;
+        diagnostics.push({
+          id: 'MF-GRAPHQL-009',
+          category: 'data',
+          status: 'UNKNOWN',
+          blocksReadiness: true,
+          summary: `${displayPath}: inline GraphQL could not be extracted`,
+          problem:
+            'This Salesforce SDK gql template contains an escape sequence that JavaScript does not expose as a cooked static string.',
+          whyItMatters:
+            'mf-check cannot parse or validate the runtime GraphQL document represented by this template.',
+          remediation: [
+            'Use a valid static template string that can be parsed by JavaScript, then run mf-check again.',
+          ],
+          file: filePath,
+          line: unvalidatedTemplate.line,
+        });
+      }
+
+      for (const inlineDocument of extractionResult.documents) {
+        inlineTemplateCount += 1;
+        const displayPath = `${relative(projectPath, filePath)}:${inlineDocument.templateLine}`;
+        let document: DocumentNode;
+
+        try {
+          document = parse(new Source(inlineDocument.sourceText, filePath));
+        } catch (error) {
+          inspectionFailureCount += 1;
+          const graphqlLine =
+            error instanceof GraphQLError ? error.locations?.[0]?.line : undefined;
+          const sourceLine = getInlineSourceLine(inlineDocument, graphqlLine);
+
+          diagnostics.push({
+            id: 'MF-GRAPHQL-005',
+            category: 'data',
+            status: 'FAIL',
+            summary: `${displayPath}: invalid inline GraphQL syntax`,
+            problem: error instanceof Error ? error.message : String(error),
+            whyItMatters:
+              'This inline GraphQL document cannot be validated against the target org schema until its syntax is valid.',
+            remediation: [
+              'Fix the GraphQL syntax in this gql template, then run mf-check again.',
+            ],
+            file: filePath,
+            ...(sourceLine !== undefined ? { line: sourceLine } : {}),
+          });
+          continue;
+        }
+
+        const executableDefinitions = document.definitions.filter(
+          (definition) =>
+            definition.kind === Kind.OPERATION_DEFINITION ||
+            definition.kind === Kind.FRAGMENT_DEFINITION
+        );
+
+        if (executableDefinitions.length === 0) {
+          continue;
+        }
+
+        executableDefinitionCount += executableDefinitions.length;
+
+        const executableDocument: DocumentNode = {
+          kind: Kind.DOCUMENT,
+          definitions: executableDefinitions,
+        };
+        const validationErrors = validate(liveGraphqlSchema, executableDocument);
+
+        if (validationErrors.length === 0) {
+          diagnostics.push({
+            id: 'MF-GRAPHQL-003',
+            category: 'data',
+            status: 'PASS',
+            summary: `${displayPath}: inline GraphQL valid against target org schema`,
+            file: filePath,
+            line: inlineDocument.templateLine,
+          });
+          continue;
+        }
+
+        const messages = new Set<string>();
+        let sourceLine: number | undefined;
+
+        for (const validationError of validationErrors) {
+          messages.add(validationError.message);
+
+          for (const node of validationError.nodes ?? []) {
+            if (!node.loc) {
+              continue;
+            }
+
+            const graphqlLine = getLocation(node.loc.source, node.loc.start).line;
+            sourceLine ??= getInlineSourceLine(inlineDocument, graphqlLine);
+          }
+        }
+
+        diagnostics.push({
+          id: 'MF-GRAPHQL-004',
+          category: 'data',
+          status: 'FAIL',
+          summary: `${displayPath}: inline GraphQL invalid against target org schema`,
+          problem: [...messages].join('\n'),
+          whyItMatters:
+            'This inline GraphQL document does not match the schema currently exposed by the selected target org, so it may fail when executed there.',
+          possibleCauses: [
+            'The referenced field or type may not exist in the target org.',
+            'The authenticated user may not have access to the referenced field or type.',
+            'The wrong target org may be selected.',
+          ],
+          remediation: [
+            'Review the reported field or type errors and update the gql template to match the target org schema.',
+            'Confirm that the intended target org is selected and that the authenticated user has access to the required schema fields.',
+          ],
+          file: filePath,
+          ...(sourceLine !== undefined ? { line: sourceLine } : {}),
+        });
+      }
+    }
+  }
+
+  if (
+    executableDefinitionCount === 0 &&
+    inlineTemplateCount === 0 &&
+    inspectionFailureCount === 0
+  ) {
     diagnostics.push({
       id: 'MF-GRAPHQL-002',
       category: 'data',
