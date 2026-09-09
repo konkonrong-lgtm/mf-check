@@ -1,6 +1,6 @@
 {
   "name": "@konkonrong/mf-check",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Preflight checks for Salesforce Multi-Framework projects.",
   "type": "module",
   "engines": {
@@ -34,7 +34,8 @@
     "@babel/traverse": "^7.29.8",
     "fast-xml-parser": "^5.11.1",
     "fast-xml-validator": "^1.4.2",
-    "graphql": "^17.0.2"
+    "graphql": "^17.0.2",
+    "ignore": "^5.3.2"
   },
   "devDependencies": {
     "@babel/types": "^7.29.8",

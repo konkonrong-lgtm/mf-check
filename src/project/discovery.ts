@@ -1,5 +1,8 @@
 import { existsSync, lstatSync, readdirSync, readFileSync, type Dirent } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join, relative, resolve, sep } from 'node:path';
+
+import ignoreModule from 'ignore';
+import type { Ignore } from 'ignore';
 
 import type { DiagnosticResult } from '../diagnostics/types.js';
 
@@ -25,6 +28,38 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isMissingPathError(error: unknown): boolean {
   return (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT';
+}
+
+function readForceIgnore(projectPath: string): Ignore | undefined {
+  const forceIgnorePath = join(projectPath, '.forceignore');
+
+  if (!existsSync(forceIgnorePath)) {
+    return undefined;
+  }
+
+  try {
+    return ignoreModule.default().add(readFileSync(forceIgnorePath, 'utf-8'));
+  } catch {
+    return undefined;
+  }
+}
+
+function isForceIgnored(
+  forceIgnore: Ignore | undefined,
+  projectPath: string,
+  directoryPath: string
+): boolean {
+  if (!forceIgnore) {
+    return false;
+  }
+
+  try {
+    const relativePath = relative(projectPath, directoryPath).split(sep).join('/');
+
+    return forceIgnore.ignores(`${relativePath}/`);
+  } catch {
+    return false;
+  }
 }
 
 export function discoverProject(projectPath: string): ProjectDiscoveryResult {
@@ -114,6 +149,7 @@ export function discoverProject(projectPath: string): ProjectDiscoveryResult {
   const sourceApiVersion =
     typeof config.sourceApiVersion === 'string' ? config.sourceApiVersion : undefined;
   const namespace = typeof config.namespace === 'string' ? config.namespace : undefined;
+  const forceIgnore = readForceIgnore(projectPath);
 
   for (const packageDirectory of config.packageDirectories) {
     if (
@@ -143,7 +179,15 @@ export function discoverProject(projectPath: string): ProjectDiscoveryResult {
     const defaultMetadataRoot = join(mainPath, 'default');
 
     metadataRoots.add(defaultMetadataRoot);
-    uiBundlesPaths.add(join(defaultMetadataRoot, 'uiBundles'));
+
+    const defaultUiBundlesPath = join(defaultMetadataRoot, 'uiBundles');
+
+    if (
+      !isForceIgnored(forceIgnore, projectPath, defaultMetadataRoot) &&
+      !isForceIgnored(forceIgnore, projectPath, defaultUiBundlesPath)
+    ) {
+      uiBundlesPaths.add(defaultUiBundlesPath);
+    }
 
     let mainIsDirectory: boolean;
 
@@ -221,7 +265,15 @@ export function discoverProject(projectPath: string): ProjectDiscoveryResult {
       .sort((left, right) => left.name.localeCompare(right.name));
 
     for (const sourceDirectory of sourceDirectories) {
-      const uiBundlesPath = join(mainPath, sourceDirectory.name, 'uiBundles');
+      const sourceDirectoryPath = join(mainPath, sourceDirectory.name);
+      const uiBundlesPath = join(sourceDirectoryPath, 'uiBundles');
+
+      if (
+        isForceIgnored(forceIgnore, projectPath, sourceDirectoryPath) ||
+        isForceIgnored(forceIgnore, projectPath, uiBundlesPath)
+      ) {
+        continue;
+      }
 
       try {
         const uiBundlesStats = lstatSync(uiBundlesPath);

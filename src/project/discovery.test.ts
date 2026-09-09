@@ -103,6 +103,60 @@ describe('discoverProject', () => {
     ]);
   });
 
+  it('discovers all custom uiBundles when .forceignore is absent', () => {
+    writeFileSync(
+      join(projectPath, 'sfdx-project.json'),
+      JSON.stringify({
+        packageDirectories: [{ path: 'force-app' }],
+        sourceApiVersion: '67.0',
+      })
+    );
+
+    const mainPath = join(projectPath, 'force-app', 'main');
+    const angularUiBundlesPath = join(mainPath, 'angular-recipes', 'uiBundles');
+    const reactUiBundlesPath = join(mainPath, 'react-recipes', 'uiBundles');
+
+    mkdirSync(angularUiBundlesPath, { recursive: true });
+    mkdirSync(reactUiBundlesPath, { recursive: true });
+
+    const result = discoverProject(projectPath);
+
+    expect(result.uiBundlesPaths).toEqual([
+      join(mainPath, 'default', 'uiBundles'),
+      angularUiBundlesPath,
+      reactUiBundlesPath,
+    ]);
+  });
+
+  it('excludes forceignored source directories while discovering other uiBundles', () => {
+    writeFileSync(
+      join(projectPath, 'sfdx-project.json'),
+      JSON.stringify({
+        packageDirectories: [{ path: 'force-app' }],
+        sourceApiVersion: '67.0',
+      })
+    );
+    writeFileSync(
+      join(projectPath, '.forceignore'),
+      '# Preview source\n\nforce-app/main/angular-recipes/**\n'
+    );
+
+    const mainPath = join(projectPath, 'force-app', 'main');
+    const angularUiBundlesPath = join(mainPath, 'angular-recipes', 'uiBundles');
+    const reactUiBundlesPath = join(mainPath, 'react-recipes', 'uiBundles');
+
+    mkdirSync(angularUiBundlesPath, { recursive: true });
+    mkdirSync(reactUiBundlesPath, { recursive: true });
+
+    const result = discoverProject(projectPath);
+
+    expect(result.uiBundlesPaths).toEqual([
+      join(mainPath, 'default', 'uiBundles'),
+      reactUiBundlesPath,
+    ]);
+    expect(result.uiBundlesPaths).not.toContain(angularUiBundlesPath);
+  });
+
   it('discovers metadata roots from multiple packageDirectories', () => {
     writeFileSync(
       join(projectPath, 'sfdx-project.json'),
